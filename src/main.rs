@@ -21,7 +21,6 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Connecting to {}...", url);
     let (room, mut event_stream) = Room::connect(&url, &token, RoomOptions::default()).await?;
-    let room = Arc::new(room);
     println!("Connected to room: {}", room.name());
 
     let host = cpal::default_host();
@@ -70,20 +69,24 @@ async fn main() -> anyhow::Result<()> {
     let mut accumulator = Vec::with_capacity(480);
     let mic_tx_bridge = mic_tx.clone();
 
-    let _input_stream = input_device.build_input_stream(
+    // Stream değişkenlerini 'guard' olarak adlandıralım ki yaşam sürelerini korudukları belli olsun
+    let _input_guard = input_device.build_input_stream(
         &config,
         move |data: &[f32], _| {
             for &sample in data {
                 accumulator.push(sample);
                 if accumulator.len() >= 480 {
-                    let mut buf = accumulator.clone();
-                    let _ = processor.process_capture_frame(&mut buf);
+                    // Optimizasyon: accumulator'ı klonlamak yerine üzerinde işlem yapıyoruz
+                    processor.process_capture_frame(&mut accumulator).unwrap();
+                    
                     let mut output_f32 = [0.0f32; 480];
                     let mut ds = ds_input.lock();
-                    ds.process_frame(&mut output_f32, &buf[..480]);
+                    ds.process_frame(&mut output_f32, &accumulator);
+
                     let output_i16: Vec<i16> = output_f32.iter()
                         .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                         .collect();
+
                     let _ = mic_tx_bridge.try_send(output_i16);
                     accumulator.clear();
                 }
@@ -92,11 +95,11 @@ async fn main() -> anyhow::Result<()> {
         |_| {},
         None,
     )?;
-    _input_stream.play()?;
+    _input_guard.play()?;
 
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<i16>();
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<i16>();
     let out_rx_shared = Arc::new(Mutex::new(out_rx));
-    let _output_stream = output_device.build_output_stream(
+    let _output_guard = output_device.build_output_stream(
         &config,
         move |data: &mut [f32], _| {
             let mut rx = out_rx_shared.lock();
@@ -107,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
         |_| {},
         None,
     )?;
-    _output_stream.play()?;
+    _output_guard.play()?;
 
     println!("Audio pipeline is active.");
 
