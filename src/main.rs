@@ -7,14 +7,22 @@ use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSupp
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
 use std::time::{Duration, Instant};
 
+// --- MODELS ---
+
+#[derive(Clone)]
+struct AudioDeviceInfo {
+    id: String,
+    display_name: String,
+}
+
 #[derive(Clone)]
 struct AudioSettings {
-    input_device_name: String,
+    input_device_id: String,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { input_device_name: "default".to_string() }
+        Self { input_device_id: "default".to_string() }
     }
 }
 
@@ -22,17 +30,66 @@ struct AudioSession {
     _streams: (cpal::Stream, cpal::Stream),
 }
 
+// --- DEVICE DISCOVERY ---
+
+fn get_professional_device_list(host: &cpal::Host) -> Vec<AudioDeviceInfo> {
+    let mut list = Vec::new();
+    let mut seen_friendly = std::collections::HashSet::new();
+
+    list.push(AudioDeviceInfo { id: "default".to_string(), display_name: "Sistem Varsayılanı".to_string() });
+    seen_friendly.insert("Sistem Varsayılanı".to_string());
+
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if let Ok(id) = device.name() {
+                let l_id = id.to_lowercase();
+                let is_usb = l_id.contains("usb");
+                
+                if !is_usb {
+                    if l_id.contains("surround") || l_id.contains("dmix") || l_id.contains("dsnoop") || 
+                       l_id.contains("null") || l_id.contains("front") || l_id.contains("pipewire") ||
+                       l_id.contains("plug") || l_id.contains("sysdefault") || id == "default" {
+                        continue;
+                    }
+                } else {
+                    if l_id.contains("dmix") || l_id.contains("dsnoop") { continue; }
+                }
+
+                let display = if l_id.contains("hw:card=pch") {
+                    "Dahili Mikrofon".to_string()
+                } else if is_usb {
+                    id.replace("hw:CARD=", "USB: ").replace("surround71:CARD=", "USB: ").replace("front:CARD=", "USB: ").replace(",DEV=0", "")
+                } else {
+                    id.replace("hw:CARD=", "Donanım: ").replace(",DEV=0", "")
+                };
+
+                if !seen_friendly.contains(&display) {
+                    list.push(AudioDeviceInfo { id, display_name: display.clone() });
+                    seen_friendly.insert(display);
+                }
+            }
+        }
+    }
+    list
+}
+
+// --- SESSION LOGIC ---
+
 impl AudioSession {
-    fn create(host: &cpal::Host, in_name: &str) -> anyhow::Result<Self> {
-        let in_device = if in_name == "default" {
-            host.default_input_device().ok_or_else(|| anyhow::anyhow!("No default mic"))?
+    fn create(host: &cpal::Host, in_id: &str) -> anyhow::Result<Self> {
+        let in_device = if in_id == "default" {
+            host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
         } else {
-            host.input_devices()? 
-                .find(|d| d.name().unwrap_or_default() == in_name)
-                .ok_or_else(|| anyhow::anyhow!("Device not found: {}", in_name))?
+            let found = host.input_devices()?
+                .find(|d| d.name().unwrap_or_default() == in_id);
+            
+            match found {
+                Some(d) => d,
+                None => return Err(anyhow::anyhow!("Device not found: {}", in_id)),
+            }
         };
         
-        let out_device = host.default_output_device().expect("No speaker");
+        let out_device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No speaker found"))?;
         let in_config = in_device.default_input_config()?;
         let out_config = out_device.default_output_config()?;
 
@@ -40,10 +97,10 @@ impl AudioSession {
         let out_sr = out_config.sample_rate().0 as f64;
         let in_format = in_config.sample_format();
 
-        println!("🎙️  Opening: {} ({}Hz, {:?})", in_name, in_sr, in_format);
+        println!("🎙️  Opening: {} ({}Hz, {:?})", in_id, in_sr, in_format);
 
-        let (mut prod_in, mut cons_in) = HeapRb::<f32>::new(in_sr as usize * 2).split();
-        let (mut prod_out, mut cons_out) = HeapRb::<f32>::new(out_sr as usize * 2).split();
+        let (mut prod_in, mut cons_in) = HeapRb::<f32>::new(48000 * 2).split();
+        let (mut prod_out, mut cons_out) = HeapRb::<f32>::new(48000 * 2).split();
 
         let in_ch = in_config.channels() as usize;
         let _in_stream = match in_format {
@@ -69,7 +126,6 @@ impl AudioSession {
             let mut proc = Processor::new(&InitializationConfig { num_capture_channels: 1, num_render_channels: 1, ..Default::default() }).unwrap();
             proc.set_config(Config { noise_suppression: Some(NoiseSuppression { suppression_level: NoiseSuppressionLevel::VeryHigh }), enable_high_pass_filter: true, enable_transient_suppressor: true, ..Default::default() });
 
-            // Define params twice to avoid clone error
             let params_in = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, window: WindowFunction::BlackmanHarris2, oversampling_factor: 256 };
             let params_out = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, window: WindowFunction::BlackmanHarris2, oversampling_factor: 256 };
             
@@ -107,55 +163,39 @@ impl AudioSession {
 
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
-    unsafe { libc::close(2); } // ALSA karmaşasını gizle
-    
+    unsafe { libc::close(2); }
     env_logger::init();
     let host = cpal::default_host();
     let settings = Arc::new(Mutex::new(AudioSettings::default()));
 
     println!("\n=== DCTS AUDIO DEVICE LIST ===");
-    // CPAL üzerinden gerçek ve temiz bir liste oluştur
-    let mut available_mics = Vec::new();
-    available_mics.push("default".to_string());
-    
-    if let Ok(devices) = host.input_devices() {
-        for d in devices {
-            if let Ok(name) = d.name() {
-                let l = name.to_lowercase();
-                if !l.contains("surround") && !l.contains("dmix") && !l.contains("dsnoop") && !l.contains("null") && name != "default" {
-                    available_mics.push(name);
-                }
-            }
-        }
-    }
-    available_mics.dedup();
-
-    for (i, name) in available_mics.iter().enumerate() {
-        println!("{}. {}", i, name);
-    }
+    let inputs = get_professional_device_list(&host);
+    for (i, dev) in inputs.iter().enumerate() { println!("{}. {{}}", i, dev.display_name); }
     println!("==============================\n");
 
-    let alt_mic_name = available_mics.iter().find(|&n| n != "default" && n != "pipewire").cloned().unwrap_or("default".to_string());
+    let alt_mic = inputs.iter()
+        .find(|d| d.id != "default" && (d.display_name.contains("Dahili") || d.display_name.contains("USB")))
+        .cloned()
+        .unwrap_or_else(|| inputs.get(inputs.len() - 1).cloned().unwrap());
 
     let mut _session: Option<AudioSession> = None;
-    let mut last_name = String::new();
+    let mut last_id = String::new();
     let start_time = Instant::now();
 
     loop {
-        let current_name = settings.lock().input_device_name.clone();
-        if current_name != last_name {
-            println!("🔄 Switching to: {}", current_name);
+        let current_id = settings.lock().input_device_id.clone();
+        if current_id != last_id {
             _session = None;
             std::thread::sleep(Duration::from_millis(500));
-            match AudioSession::create(&host, &current_name) {
-                Ok(s) => { _session = Some(s); last_name = current_name; println!("✅ Active."); } 
-                Err(e) => { println!("❌ Failed: {}. Retrying default.", e); settings.lock().input_device_name = "default".to_string(); }
+            match AudioSession::create(&host, &current_id) {
+                Ok(s) => { _session = Some(s); last_id = current_id; println!("✅ Active."); } 
+                Err(_) => { last_id = current_id; }
             }
         }
         std::thread::sleep(Duration::from_millis(100));
-        if start_time.elapsed() > Duration::from_secs(10) && settings.lock().input_device_name == "default" {
-            println!("⏰ Switching to: {}", alt_mic_name);
-            settings.lock().input_device_name = alt_mic_name.clone();
+        if start_time.elapsed() > Duration::from_secs(10) && settings.lock().input_device_id == "default" {
+            println!("⏰ Auto-switching to: {}", alt_mic.display_name);
+            settings.lock().input_device_id = alt_mic.id.clone();
         }
     }
 }
