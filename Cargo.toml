@@ -1,0 +1,19 @@
+[package]
+name = "dcts-audio-poc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+livekit = "0.7.28"
+cpal = "0.15"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+dotenv = "0.15"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+parking_lot = "0.12"
+rubato = "0.14"
+ringbuf = "0.3"
+nnnoiseless = "0.5"
+webrtc-audio-processing = "0.3"
