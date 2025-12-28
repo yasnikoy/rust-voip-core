@@ -23,7 +23,7 @@ Required system libraries (Linux):
 ### Level 1: Basic Management
 - [x] Fixed 48kHz Processing Pipeline
 - [x] Thread-safe Settings Infrastructure (Shared State)
-- [ ] Input/Output Device Selection
+- [x] Input/Output Device Selection
 - [x] Digital Input Gain Control
 - [x] Digital Output Gain Control
 
