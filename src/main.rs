@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
 use parking_lot::Mutex;
-use ringbuf::{HeapRb, Rb};
+use ringbuf::HeapRb;
 use nnnoiseless::DenoiseState;
 use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSuppression, NoiseSuppressionLevel};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
@@ -36,56 +36,108 @@ fn get_professional_device_list(host: &cpal::Host) -> Vec<AudioDeviceInfo> {
     let mut list = Vec::new();
     let mut seen_friendly = std::collections::HashSet::new();
 
-    list.push(AudioDeviceInfo { id: "default".to_string(), display_name: "Sistem Varsayılanı".to_string() });
-    seen_friendly.insert("Sistem Varsayılanı".to_string());
+    // 1. Always add a generic default option first
+    list.push(AudioDeviceInfo { 
+        id: "default".to_string(), 
+        display_name: "Sistem Varsayılanı (Pulse/Pipewire)".to_string() 
+    });
+    seen_friendly.insert("Sistem Varsayılanı (Pulse/Pipewire)".to_string());
 
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(id) = device.name() {
                 let l_id = id.to_lowercase();
-                let is_usb = l_id.contains("usb");
                 
-                if !is_usb {
-                    if l_id.contains("surround") || l_id.contains("dmix") || l_id.contains("dsnoop") || 
-                       l_id.contains("null") || l_id.contains("front") || l_id.contains("pipewire") ||
-                       l_id.contains("plug") || l_id.contains("sysdefault") || id == "default" {
-                        continue;
-                    }
-                } else {
-                    if l_id.contains("dmix") || l_id.contains("dsnoop") { continue; }
+                // --- FILTERING RULES ---
+                // Exclude raw hardware access and complex plugins that cause format issues
+                if l_id.starts_with("hw:") || 
+                   l_id.contains("dmix") || 
+                   l_id.contains("dsnoop") || 
+                   l_id.contains("surround") || 
+                   l_id.contains("front") || 
+                   l_id.contains("rear") || 
+                   l_id.contains("center") || 
+                   l_id.contains("side") || 
+                   l_id.contains("iec958") || 
+                   l_id.contains("hdmi") || 
+                   l_id.contains("null") ||
+                   id == "default" { // "default" is manually added above
+                    continue;
                 }
 
-                let display = if l_id.contains("hw:card=pch") {
-                    "Dahili Mikrofon".to_string()
-                } else if is_usb {
-                    id.replace("hw:CARD=", "USB: ").replace("surround71:CARD=", "USB: ").replace("front:CARD=", "USB: ").replace(",DEV=0", "")
+                // Accept only reliable abstractions: 'sysdefault' (OS managed) and 'plughw' (Format converting)
+                let is_reliable = l_id.contains("sysdefault") || l_id.contains("plughw");
+                if !is_reliable {
+                    continue; 
+                }
+
+                // --- FRIENDLY NAME PARSING ---
+                // Format: "sysdefault:CARD=PCH" -> "PCH (System Default)"
+                // Format: "plughw:CARD=Microphone,DEV=0" -> "Microphone (PlugHW)"
+                
+                let clean_name = if let Some(card_part) = id.split("CARD=").nth(1) {
+                    let raw_name = card_part.split(',').next().unwrap_or(card_part);
+                    // Decode common USB device names if needed, or keep generic
+                    if l_id.contains("sysdefault") {
+                        format!("{} (System Default)", raw_name)
+                    } else {
+                        format!("{} (Direct/Plug)", raw_name)
+                    }
                 } else {
-                    id.replace("hw:CARD=", "Donanım: ").replace(",DEV=0", "")
+                    id.clone() // Fallback
                 };
 
-                if !seen_friendly.contains(&display) {
-                    list.push(AudioDeviceInfo { id, display_name: display.clone() });
-                    seen_friendly.insert(display);
+                if !seen_friendly.contains(&clean_name) {
+                    list.push(AudioDeviceInfo { id, display_name: clean_name.clone() });
+                    seen_friendly.insert(clean_name);
                 }
             }
         }
     }
+    
+    // Sort: Default first, then others alphabetically
+    list.sort_by(|a, b| {
+        if a.id == "default" { std::cmp::Ordering::Less }
+        else if b.id == "default" { std::cmp::Ordering::Greater }
+        else { a.display_name.cmp(&b.display_name) }
+    });
+    
     list
 }
 
 // --- SESSION LOGIC ---
 
 impl AudioSession {
-    fn create(host: &cpal::Host, in_id: &str) -> anyhow::Result<Self> {
+    fn create(in_id: &str) -> anyhow::Result<Self> {
+        let host = cpal::default_host();
         let in_device = if in_id == "default" {
             host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
         } else {
-            let found = host.input_devices()?
-                .find(|d| d.name().unwrap_or_default() == in_id);
+            let mut devices = host.input_devices()?;
+            let mut found = devices.find(|d| d.name().unwrap_or_default() == in_id);
             
+            if found.is_none() {
+                // FALLBACK: Try to find by partial match (e.g. if sysdefault is gone, try plughw)
+                if let Some(card_name) = in_id.split("CARD=").nth(1).and_then(|s| s.split(',').next()) {
+                    println!("⚠️ Exact match not found, trying fallback for card: '{}'", card_name);
+                    // Re-acquire iterator as the previous one was consumed
+                    let mut devices_retry = host.input_devices()?;
+                    found = devices_retry.find(|d| d.name().unwrap_or_default().contains(card_name));
+                    if let Some(ref d) = found {
+                        println!("🔄 Fallback found: {}", d.name().unwrap_or_default());
+                    }
+                }
+            }
+
             match found {
                 Some(d) => d,
-                None => return Err(anyhow::anyhow!("Device not found: {}", in_id)),
+                None => {
+                    println!("⚠️  Could not find '{}'. Available devices:", in_id);
+                    for d in host.input_devices()? {
+                        println!("   - '{}'", d.name().unwrap_or_default());
+                    }
+                    return Err(anyhow::anyhow!("Device not found: {}", in_id));
+                },
             }
         };
         
@@ -170,32 +222,50 @@ fn main() -> anyhow::Result<()> {
 
     println!("\n=== DCTS AUDIO DEVICE LIST ===");
     let inputs = get_professional_device_list(&host);
-    for (i, dev) in inputs.iter().enumerate() { println!("{}. {{}}", i, dev.display_name); }
+    for (i, dev) in inputs.iter().enumerate() { println!("{}. {}", i, dev.display_name); }
     println!("==============================\n");
 
+    // Prioritize "System Default" devices for better compatibility
     let alt_mic = inputs.iter()
-        .find(|d| d.id != "default" && (d.display_name.contains("Dahili") || d.display_name.contains("USB")))
+        .find(|d| d.id != "default" && d.display_name.contains("System Default") && (d.display_name.contains("Dahili") || d.display_name.contains("USB")))
+        .or_else(|| inputs.iter().find(|d| d.id != "default" && (d.display_name.contains("Dahili") || d.display_name.contains("USB"))))
         .cloned()
         .unwrap_or_else(|| inputs.get(inputs.len() - 1).cloned().unwrap());
 
+    // START WITH DEFAULT SETTINGS
+    // settings.lock().input_device_id is "default" by the Default impl.
+    
+    // Select initial device based on settings (which is "default")
+    // If we wanted to persist settings, we would load them here.
+
     let mut _session: Option<AudioSession> = None;
     let mut last_id = String::new();
-    let start_time = Instant::now();
+    
+    // Initial start
+    // We let the loop handle the first start to reuse logic
 
     loop {
         let current_id = settings.lock().input_device_id.clone();
         if current_id != last_id {
-            _session = None;
-            std::thread::sleep(Duration::from_millis(500));
-            match AudioSession::create(&host, &current_id) {
+            if _session.is_some() {
+                println!("🛑 Closing old session...");
+                _session = None; // Explicit drop
+            }
+            
+            // Wait for device to be released by OS/ALSA
+            std::thread::sleep(Duration::from_millis(1000));
+            
+            match AudioSession::create(&current_id) {
                 Ok(s) => { _session = Some(s); last_id = current_id; println!("✅ Active."); } 
-                Err(_) => { last_id = current_id; }
+                Err(e) => { 
+                    println!("❌ Failed to open '{}': {:?}", current_id, e);
+                    // Don't update last_id so it retries or allows UI to show error state
+                    // Actually, if we fail, we might want to stay in "failed" state or fallback.
+                    // For now, let's update last_id to prevent infinite retry loop on same ID
+                    last_id = current_id; 
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(100));
-        if start_time.elapsed() > Duration::from_secs(10) && settings.lock().input_device_id == "default" {
-            println!("⏰ Auto-switching to: {}", alt_mic.display_name);
-            settings.lock().input_device_id = alt_mic.id.clone();
-        }
     }
 }
