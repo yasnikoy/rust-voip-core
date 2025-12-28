@@ -4,142 +4,198 @@ use parking_lot::Mutex;
 use ringbuf::{HeapRb, Rb};
 use nnnoiseless::DenoiseState;
 use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSuppression, NoiseSuppressionLevel};
+use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
+use std::time::{Duration, Instant};
 
-// --- SETTINGS INFRASTRUCTURE ---
+// --- MODELS ---
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
+struct AudioDeviceInfo {
+    id: String,
+    display_name: String,
+}
+
+#[derive(Clone)]
 struct AudioSettings {
-    input_gain: f32,
-    output_gain: f32,
-    gate_threshold: f32,
-    gate_hold_frames: u32,
-    ns_level: NoiseSuppressionLevel,
-    enable_rnnoise: bool,
-    enable_hpf: bool,
-    enable_ts: bool,
+    input_device_id: String,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self {
-            input_gain: 1.0,
-            output_gain: 1.0,
-            gate_threshold: 0.015,
-            gate_hold_frames: 20,
-            ns_level: NoiseSuppressionLevel::VeryHigh,
-            enable_rnnoise: true,
-            enable_hpf: true,
-            enable_ts: true,
+        Self { input_device_id: "default".to_string() }
+    }
+}
+
+struct AudioSession {
+    _streams: (cpal::Stream, cpal::Stream),
+}
+
+// --- DEVICE DISCOVERY ---
+
+fn get_professional_device_list(host: &cpal::Host) -> Vec<AudioDeviceInfo> {
+    let mut list = Vec::new();
+    let mut seen_friendly = std::collections::HashSet::new();
+
+    list.push(AudioDeviceInfo { id: "default".to_string(), display_name: "Sistem Varsayılanı".to_string() });
+    seen_friendly.insert("Sistem Varsayılanı".to_string());
+
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if let Ok(id) = device.name() {
+                let l_id = id.to_lowercase();
+                let is_usb = l_id.contains("usb");
+                
+                if !is_usb {
+                    if l_id.contains("surround") || l_id.contains("dmix") || l_id.contains("dsnoop") || 
+                       l_id.contains("null") || l_id.contains("front") || l_id.contains("pipewire") ||
+                       l_id.contains("plug") || l_id.contains("sysdefault") || id == "default" {
+                        continue;
+                    }
+                } else {
+                    if l_id.contains("dmix") || l_id.contains("dsnoop") { continue; }
+                }
+
+                let display = if l_id.contains("hw:card=pch") {
+                    "Dahili Mikrofon".to_string()
+                } else if is_usb {
+                    id.replace("hw:CARD=", "USB: ").replace("surround71:CARD=", "USB: ").replace("front:CARD=", "USB: ").replace(",DEV=0", "")
+                } else {
+                    id.replace("hw:CARD=", "Donanım: ").replace(",DEV=0", "")
+                };
+
+                if !seen_friendly.contains(&display) {
+                    list.push(AudioDeviceInfo { id, display_name: display.clone() });
+                    seen_friendly.insert(display);
+                }
+            }
         }
+    }
+    list
+}
+
+// --- SESSION LOGIC ---
+
+impl AudioSession {
+    fn create(host: &cpal::Host, in_id: &str) -> anyhow::Result<Self> {
+        let in_device = if in_id == "default" {
+            host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
+        } else {
+            let found = host.input_devices()?
+                .find(|d| d.name().unwrap_or_default() == in_id);
+            
+            match found {
+                Some(d) => d,
+                None => return Err(anyhow::anyhow!("Device not found: {}", in_id)),
+            }
+        };
+        
+        let out_device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No speaker found"))?;
+        let in_config = in_device.default_input_config()?;
+        let out_config = out_device.default_output_config()?;
+
+        let in_sr = in_config.sample_rate().0 as f64;
+        let out_sr = out_config.sample_rate().0 as f64;
+        let in_format = in_config.sample_format();
+
+        println!("🎙️  Opening: {} ({}Hz, {:?})", in_id, in_sr, in_format);
+
+        let (mut prod_in, mut cons_in) = HeapRb::<f32>::new(48000 * 2).split();
+        let (mut prod_out, mut cons_out) = HeapRb::<f32>::new(48000 * 2).split();
+
+        let in_ch = in_config.channels() as usize;
+        let _in_stream = match in_format {
+            cpal::SampleFormat::F32 => in_device.build_input_stream(&in_config.into(), move |data: &[f32], _| {
+                for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0]); }
+            }, |_| {}, None)?,
+            cpal::SampleFormat::I16 => in_device.build_input_stream(&in_config.into(), move |data: &[i16], _| {
+                for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0] as f32 / i16::MAX as f32); }
+            }, |_| {}, None)?,
+            _ => return Err(anyhow::anyhow!("Unsupported format")),
+        };
+
+        let out_ch = out_config.channels() as usize;
+        let _out_stream = out_device.build_output_stream(&out_config.into(), move |data: &mut [f32], _| {
+            for chunk in data.chunks_mut(out_ch) {
+                let s = cons_out.pop().unwrap_or(0.0);
+                for ch in chunk.iter_mut() { *ch = s; }
+            }
+        }, |_| {}, None)?;
+
+        std::thread::spawn(move || {
+            let mut denoise = DenoiseState::new();
+            let mut proc = Processor::new(&InitializationConfig { num_capture_channels: 1, num_render_channels: 1, ..Default::default() }).unwrap();
+            proc.set_config(Config { noise_suppression: Some(NoiseSuppression { suppression_level: NoiseSuppressionLevel::VeryHigh }), enable_high_pass_filter: true, enable_transient_suppressor: true, ..Default::default() });
+
+            let params_in = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, window: WindowFunction::BlackmanHarris2, oversampling_factor: 256 };
+            let params_out = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, window: WindowFunction::BlackmanHarris2, oversampling_factor: 256 };
+            
+            let mut res_in = SincFixedIn::<f32>::new(48000.0 / in_sr, 2.0, params_in, 480, 1).unwrap();
+            let mut res_out = SincFixedIn::<f32>::new(out_sr / 48000.0, 2.0, params_out, 480, 1).unwrap();
+
+            let mut dsp_buf = Vec::new();
+            loop {
+                let needed = res_in.input_frames_next();
+                if cons_in.len() >= needed {
+                    let mut chunk = vec![0.0f32; needed];
+                    for s in chunk.iter_mut() { *s = cons_in.pop().unwrap(); }
+                    if let Ok(res) = res_in.process(&[chunk], None) {
+                        dsp_buf.extend_from_slice(&res[0]);
+                        while dsp_buf.len() >= 480 {
+                            let mut frame = dsp_buf.drain(0..480).collect::<Vec<_>>();
+                            let _ = proc.process_capture_frame(&mut frame);
+                            let mut clean = [0.0f32; 480];
+                            denoise.process_frame(&mut clean, &frame);
+                            if let Ok(res_o) = res_out.process(&[clean.to_vec()], None) {
+                                for &s in &res_o[0] { let _ = prod_out.push(s); }
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        _in_stream.play()?;
+        _out_stream.play()?;
+        Ok(Self { _streams: (_in_stream, _out_stream) })
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    unsafe { libc::close(2); }
     env_logger::init();
-
+    let host = cpal::default_host();
     let settings = Arc::new(Mutex::new(AudioSettings::default()));
 
-    println!("🚀 Starting Local Audio Loopback...");
+    println!("\n=== DCTS AUDIO DEVICE LIST ===");
+    let inputs = get_professional_device_list(&host);
+    for (i, dev) in inputs.iter().enumerate() { println!("{}. {{}}", i, dev.display_name); }
+    println!("==============================\n");
 
-    let host = cpal::default_host();
-    let input_device = host.default_input_device().expect("No input device");
-    let output_device = host.default_output_device().expect("No output device");
+    let alt_mic = inputs.iter()
+        .find(|d| d.id != "default" && (d.display_name.contains("Dahili") || d.display_name.contains("USB")))
+        .cloned()
+        .unwrap_or_else(|| inputs.get(inputs.len() - 1).cloned().unwrap());
 
-    let config = cpal::StreamConfig {
-        channels: 1,
-        sample_rate: cpal::SampleRate(48000),
-        buffer_size: cpal::BufferSize::Default,
-    };
+    let mut _session: Option<AudioSession> = None;
+    let mut last_id = String::new();
+    let start_time = Instant::now();
 
-    // --- WebRTC Processor Setup (FIXED) ---
-    let mut processor = Processor::new(&InitializationConfig {
-        num_capture_channels: 1,
-        num_render_channels: 1,
-        ..Default::default()
-    })?;
-
-    // Ayarları işlemciye net bir şekilde gönderelim
-    {
-        let s = settings.lock();
-        processor.set_config(Config {
-            noise_suppression: Some(NoiseSuppression {
-                suppression_level: s.ns_level,
-            }),
-            enable_high_pass_filter: s.enable_hpf,
-            enable_transient_suppressor: s.enable_ts,
-            ..Default::default()
-        });
+    loop {
+        let current_id = settings.lock().input_device_id.clone();
+        if current_id != last_id {
+            _session = None;
+            std::thread::sleep(Duration::from_millis(500));
+            match AudioSession::create(&host, &current_id) {
+                Ok(s) => { _session = Some(s); last_id = current_id; println!("✅ Active."); } 
+                Err(_) => { last_id = current_id; }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        if start_time.elapsed() > Duration::from_secs(10) && settings.lock().input_device_id == "default" {
+            println!("⏰ Auto-switching to: {}", alt_mic.display_name);
+            settings.lock().input_device_id = alt_mic.id.clone();
+        }
     }
-
-    let rb = HeapRb::<f32>::new(48000);
-    let (mut prod, mut cons) = rb.split();
-
-    let denoise_state = Arc::new(Mutex::new(DenoiseState::new()));
-    let settings_input = settings.clone();
-    let ds_input = denoise_state.clone();
-    let mut accumulator = Vec::with_capacity(480);
-    
-    let mut is_gate_open = false;
-    let mut current_hold = 0;
-
-    let _input_guard = input_device.build_input_stream(
-        &config,
-        move |data: &[f32], _| {
-            let s = settings_input.lock();
-            
-            for &sample in data {
-                accumulator.push(sample * s.input_gain);
-                
-                if accumulator.len() >= 480 {
-                    // 1. WebRTC Pre-processing (NS + HPF + TS)
-                    processor.process_capture_frame(&mut accumulator).unwrap();
-                    
-                    let max_amplitude = accumulator.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-                    if max_amplitude > s.gate_threshold {
-                        is_gate_open = true;
-                        current_hold = s.gate_hold_frames;
-                    } else {
-                        if current_hold > 0 { current_hold -= 1; } else { is_gate_open = false; }
-                    }
-
-                    let mut output_f32 = [0.0f32; 480];
-                    if is_gate_open {
-                        if s.enable_rnnoise {
-                            // 2. RNNoise Post-processing
-                            let mut ds = ds_input.lock();
-                            ds.process_frame(&mut output_f32, &accumulator);
-                        } else {
-                            output_f32.copy_from_slice(&accumulator);
-                        }
-                    }
-
-                    for &s_out in &output_f32 {
-                        let _ = prod.push(s_out);
-                    }
-                    accumulator.clear();
-                }
-            }
-        },
-        |_| {},
-        None,
-    )?;
-
-    let settings_output = settings.clone();
-    let _output_guard = output_device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _| {
-            let s = settings_output.lock();
-            for out_sample in data.iter_mut() {
-                *out_sample = cons.pop().map(|v| v * s.output_gain).unwrap_or(0.0);
-            }
-        },
-        |_| {},
-        None,
-    )?;
-
-    _input_guard.play()?;
-    _output_guard.play()?;
-
-    std::thread::park();
-    Ok(())
 }
