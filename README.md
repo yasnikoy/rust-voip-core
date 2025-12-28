@@ -28,7 +28,7 @@ Required system libraries (Linux):
 - [x] Digital Output Gain Control
 
 ### Level 2: Transmission Control
-- [ ] Push-to-Talk (PTT) with Global Hotkeys
+- [x] Push-to-Talk (PTT) with Global Hotkeys
 - [x] Voice Activity Detection (VAD) / Noise Gate
 - [x] Configurable Gate Hold Time (Attack/Release)
 
@@ -36,12 +36,12 @@ Required system libraries (Linux):
 - [x] Noise Suppression (RNNoise + WebRTC VeryHigh)
 - [x] High-Pass Filter (HPF)
 - [x] Transient Suppressor (Anti-Click/Pop)
-- [ ] Acoustic Echo Cancellation (AEC)
+- [x] Acoustic Echo Cancellation (AEC)
 
 ### Level 4: Quality & Dynamics
-- [ ] Automatic Gain Control (AGC)
-- [ ] Peak Limiter
-- [ ] Compressor
+- [x] Automatic Gain Control (AGC)
+- [x] Peak Limiter
+- [x] Compressor
 
 ### Level 5: Spatial & Environmental
 - [ ] 3D/Positional Audio (Panning/Distance)
