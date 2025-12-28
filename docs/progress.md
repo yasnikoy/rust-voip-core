@@ -1,10 +1,10 @@
 # Project Roadmap
 
 ## Level 1: Basic Audio Management (Refactoring)
-- Improve ALSA device enumeration to handle duplicates (hw, plughw, default)
-- Implement friendly name parsing for Linux audio devices
-- Prioritize plughw over hw interfaces for better format compatibility
-- Implement strict format checking (f32/i16) before stream creation
+- [x] Improve ALSA device enumeration to handle duplicates (hw, plughw, default)
+- [x] Implement friendly name parsing for Linux audio devices
+- [x] Prioritize plughw over hw interfaces for better format compatibility
+- [x] Implement strict format checking (f32/i16) before stream creation
 
 ## Level 2: Transmission Control
 - Implement Push-to-Talk (PTT) mechanism

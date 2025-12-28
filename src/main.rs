@@ -1,11 +1,13 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
 use nnnoiseless::DenoiseState;
 use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSuppression, NoiseSuppressionLevel};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
 use std::time::{Duration, Instant};
+use rdev::{listen, Event, EventType, Key};
 
 // --- MODELS ---
 
@@ -15,14 +17,24 @@ struct AudioDeviceInfo {
     display_name: String,
 }
 
+struct GlobalAudioState {
+    is_transmitting: AtomicBool,
+}
+
 #[derive(Clone)]
 struct AudioSettings {
     input_device_id: String,
+    ptt_key: Key,
+    ptt_enabled: bool,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { input_device_id: "default".to_string() }
+        Self { 
+            input_device_id: "default".to_string(),
+            ptt_key: Key::ControlLeft, // Default PTT key: Left Control
+            ptt_enabled: true,
+        }
     }
 }
 
@@ -108,7 +120,7 @@ fn get_professional_device_list(host: &cpal::Host) -> Vec<AudioDeviceInfo> {
 // --- SESSION LOGIC ---
 
 impl AudioSession {
-    fn create(in_id: &str) -> anyhow::Result<Self> {
+    fn create(in_id: &str, state: Arc<GlobalAudioState>) -> anyhow::Result<Self> {
         let host = cpal::default_host();
         let in_device = if in_id == "default" {
             host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
@@ -197,8 +209,17 @@ impl AudioSession {
                             let _ = proc.process_capture_frame(&mut frame);
                             let mut clean = [0.0f32; 480];
                             denoise.process_frame(&mut clean, &frame);
+                            
+                            let is_tx = state.is_transmitting.load(Ordering::Relaxed);
+                            
                             if let Ok(res_o) = res_out.process(&[clean.to_vec()], None) {
-                                for &s in &res_o[0] { let _ = prod_out.push(s); }
+                                for &s in &res_o[0] { 
+                                    if is_tx {
+                                        let _ = prod_out.push(s); 
+                                    } else {
+                                        let _ = prod_out.push(0.0); // PTT Mute
+                                    }
+                                }
                             }
                         }
                     }
@@ -219,6 +240,57 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let host = cpal::default_host();
     let settings = Arc::new(Mutex::new(AudioSettings::default()));
+    
+    // --- SHARED STATE & INPUT HANDLING ---
+    let global_state = Arc::new(GlobalAudioState { 
+        is_transmitting: AtomicBool::new(false) 
+    });
+
+    let input_state = global_state.clone();
+    let input_settings = settings.clone();
+    
+    std::thread::spawn(move || {
+        println!("⌨️  Global Input Listener started (rdev)");
+        
+        // This callback will be called for every input event
+        let callback = move |event: Event| {
+            let (target_key, enabled) = {
+                let s = input_settings.lock();
+                (s.ptt_key, s.ptt_enabled)
+            };
+
+            if !enabled {
+                input_state.is_transmitting.store(true, Ordering::Relaxed);
+                return;
+            }
+
+            match event.event_type {
+                EventType::KeyPress(key) => {
+                    if key == target_key {
+                        let prev = input_state.is_transmitting.swap(true, Ordering::Relaxed);
+                        if !prev {
+                            print!("🎤 ");
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                },
+                EventType::KeyRelease(key) => {
+                    if key == target_key {
+                        input_state.is_transmitting.store(false, Ordering::Relaxed);
+                        print!("🔇 ");
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                    }
+                },
+                _ => {}
+            }
+        };
+
+        if let Err(error) = listen(callback) {
+            println!("❌ Input Error: {:?}", error);
+        }
+    });
 
     println!("\n=== DCTS AUDIO DEVICE LIST ===");
     let inputs = get_professional_device_list(&host);
@@ -255,7 +327,7 @@ fn main() -> anyhow::Result<()> {
             // Wait for device to be released by OS/ALSA
             std::thread::sleep(Duration::from_millis(1000));
             
-            match AudioSession::create(&current_id) {
+            match AudioSession::create(&current_id, global_state.clone()) {
                 Ok(s) => { _session = Some(s); last_id = current_id; println!("✅ Active."); } 
                 Err(e) => { 
                     println!("❌ Failed to open '{}': {:?}", current_id, e);
