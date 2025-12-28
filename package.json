@@ -1,4 +1,5 @@
 {
+  "name": "neandertal-voip-core",
   "dependencies": {
     "livekit-server-sdk": "^2.15.0"
   }

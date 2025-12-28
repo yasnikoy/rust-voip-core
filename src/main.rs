@@ -328,7 +328,7 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    println!("\n=== DCTS AUDIO DEVICE LIST ===");
+    println!("\n=== NEANDERTAL VOIP CORE AUDIO DEVICE LIST ===");
     let inputs = get_professional_device_list(&host);
     for (i, dev) in inputs.iter().enumerate() { println!("{}. {}", i, dev.display_name); }
     println!("==============================\n");

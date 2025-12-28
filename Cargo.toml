@@ -1,5 +1,5 @@
 [package]
-name = "dcts-audio-poc"
+name = "neandertal-voip-core"
 version = "0.1.0"
 edition = "2021"
 
