@@ -6,7 +6,7 @@ use ringbuf::HeapRb;
 use nnnoiseless::DenoiseState;
 use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSuppression, NoiseSuppressionLevel};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use rdev::{listen, Event, EventType, Key};
 
 // --- MODELS ---
@@ -26,6 +26,8 @@ struct AudioSettings {
     input_device_id: String,
     ptt_key: Key,
     ptt_enabled: bool,
+    aec_enabled: bool,
+    agc_enabled: bool,
 }
 
 impl Default for AudioSettings {
@@ -33,7 +35,9 @@ impl Default for AudioSettings {
         Self { 
             input_device_id: "default".to_string(),
             ptt_key: Key::ControlLeft, // Default PTT key: Left Control
-            ptt_enabled: true,
+            ptt_enabled: false, // Disabled by default for easier testing
+            aec_enabled: true,
+            agc_enabled: true,
         }
     }
 }
@@ -120,75 +124,97 @@ fn get_professional_device_list(host: &cpal::Host) -> Vec<AudioDeviceInfo> {
 // --- SESSION LOGIC ---
 
 impl AudioSession {
-    fn create(in_id: &str, state: Arc<GlobalAudioState>) -> anyhow::Result<Self> {
-        let host = cpal::default_host();
-        let in_device = if in_id == "default" {
-            host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
-        } else {
-            let mut devices = host.input_devices()?;
-            let mut found = devices.find(|d| d.name().unwrap_or_default() == in_id);
-            
-            if found.is_none() {
-                // FALLBACK: Try to find by partial match (e.g. if sysdefault is gone, try plughw)
-                if let Some(card_name) = in_id.split("CARD=").nth(1).and_then(|s| s.split(',').next()) {
-                    println!("⚠️ Exact match not found, trying fallback for card: '{}'", card_name);
-                    // Re-acquire iterator as the previous one was consumed
-                    let mut devices_retry = host.input_devices()?;
-                    found = devices_retry.find(|d| d.name().unwrap_or_default().contains(card_name));
-                    if let Some(ref d) = found {
-                        println!("🔄 Fallback found: {}", d.name().unwrap_or_default());
+        fn create(in_id: &str, state: Arc<GlobalAudioState>, settings: AudioSettings) -> anyhow::Result<Self> {
+            let host = cpal::default_host();
+            let in_device = if in_id == "default" {
+                host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
+            } else {
+                let mut devices = host.input_devices()?;
+                let mut found = devices.find(|d| d.name().unwrap_or_default() == in_id);
+                
+                if found.is_none() {
+                    // FALLBACK: Try to find by partial match (e.g. if sysdefault is gone, try plughw)
+                    if let Some(card_name) = in_id.split("CARD=").nth(1).and_then(|s| s.split(',').next()) {
+                        println!("⚠️ Exact match not found, trying fallback for card: '{}'", card_name);
+                        // Re-acquire iterator as the previous one was consumed
+                        let mut devices_retry = host.input_devices()?;
+                        found = devices_retry.find(|d| d.name().unwrap_or_default().contains(card_name));
+                        if let Some(ref d) = found {
+                            println!("🔄 Fallback found: {}", d.name().unwrap_or_default());
+                        }
                     }
                 }
-            }
-
-            match found {
-                Some(d) => d,
-                None => {
-                    println!("⚠️  Could not find '{}'. Available devices:", in_id);
-                    for d in host.input_devices()? {
-                        println!("   - '{}'", d.name().unwrap_or_default());
-                    }
-                    return Err(anyhow::anyhow!("Device not found: {}", in_id));
-                },
-            }
-        };
-        
-        let out_device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No speaker found"))?;
-        let in_config = in_device.default_input_config()?;
-        let out_config = out_device.default_output_config()?;
-
-        let in_sr = in_config.sample_rate().0 as f64;
-        let out_sr = out_config.sample_rate().0 as f64;
-        let in_format = in_config.sample_format();
-
-        println!("🎙️  Opening: {} ({}Hz, {:?})", in_id, in_sr, in_format);
-
-        let (mut prod_in, mut cons_in) = HeapRb::<f32>::new(48000 * 2).split();
-        let (mut prod_out, mut cons_out) = HeapRb::<f32>::new(48000 * 2).split();
-
-        let in_ch = in_config.channels() as usize;
-        let _in_stream = match in_format {
-            cpal::SampleFormat::F32 => in_device.build_input_stream(&in_config.into(), move |data: &[f32], _| {
-                for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0]); }
-            }, |_| {}, None)?,
-            cpal::SampleFormat::I16 => in_device.build_input_stream(&in_config.into(), move |data: &[i16], _| {
-                for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0] as f32 / i16::MAX as f32); }
-            }, |_| {}, None)?,
-            _ => return Err(anyhow::anyhow!("Unsupported format")),
-        };
-
-        let out_ch = out_config.channels() as usize;
-        let _out_stream = out_device.build_output_stream(&out_config.into(), move |data: &mut [f32], _| {
-            for chunk in data.chunks_mut(out_ch) {
-                let s = cons_out.pop().unwrap_or(0.0);
-                for ch in chunk.iter_mut() { *ch = s; }
-            }
-        }, |_| {}, None)?;
-
-        std::thread::spawn(move || {
-            let mut denoise = DenoiseState::new();
-            let mut proc = Processor::new(&InitializationConfig { num_capture_channels: 1, num_render_channels: 1, ..Default::default() }).unwrap();
-            proc.set_config(Config { noise_suppression: Some(NoiseSuppression { suppression_level: NoiseSuppressionLevel::VeryHigh }), enable_high_pass_filter: true, enable_transient_suppressor: true, ..Default::default() });
+    
+                match found {
+                    Some(d) => d,
+                    None => {
+                        println!("⚠️  Could not find '{}'. Available devices:", in_id);
+                        for d in host.input_devices()? {
+                            println!("   - '{}'", d.name().unwrap_or_default());
+                        }
+                        return Err(anyhow::anyhow!("Device not found: {}", in_id));
+                    },
+                }
+            };
+            
+            let out_device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No speaker found"))?;
+            let in_config = in_device.default_input_config()?;
+            let out_config = out_device.default_output_config()?;
+    
+            let in_sr = in_config.sample_rate().0 as f64;
+            let out_sr = out_config.sample_rate().0 as f64;
+            let in_format = in_config.sample_format();
+    
+            println!("🎙️  Opening: {} ({}Hz, {:?})", in_id, in_sr, in_format);
+    
+            let (mut prod_in, mut cons_in) = HeapRb::<f32>::new(48000 * 2).split();
+            let (mut prod_out, mut cons_out) = HeapRb::<f32>::new(48000 * 2).split();
+    
+            let in_ch = in_config.channels() as usize;
+            let _in_stream = match in_format {
+                cpal::SampleFormat::F32 => in_device.build_input_stream(&in_config.into(), move |data: &[f32], _| {
+                    for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0]); }
+                }, |_| {}, None)?,
+                cpal::SampleFormat::I16 => in_device.build_input_stream(&in_config.into(), move |data: &[i16], _| {
+                    for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0] as f32 / i16::MAX as f32); }
+                }, |_| {}, None)?,
+                _ => return Err(anyhow::anyhow!("Unsupported format")),
+            };
+    
+            let out_ch = out_config.channels() as usize;
+            let _out_stream = out_device.build_output_stream(&out_config.into(), move |data: &mut [f32], _| {
+                for chunk in data.chunks_mut(out_ch) {
+                    let s = cons_out.pop().unwrap_or(0.0);
+                    for ch in chunk.iter_mut() { *ch = s; }
+                }
+            }, |_| {}, None)?;
+    
+            std::thread::spawn(move || {
+                let mut denoise = DenoiseState::new();
+                let mut proc = Processor::new(&InitializationConfig { 
+                    num_capture_channels: 1, 
+                    num_render_channels: 1, 
+                    ..Default::default() 
+                }).unwrap();
+                
+                proc.set_config(Config { 
+                    noise_suppression: Some(NoiseSuppression { suppression_level: NoiseSuppressionLevel::VeryHigh }), 
+                    echo_cancellation: if settings.aec_enabled { Some(webrtc_audio_processing::EchoCancellation {
+                        suppression_level: webrtc_audio_processing::EchoCancellationSuppressionLevel::High,
+                        stream_delay_ms: None, 
+                        enable_delay_agnostic: true,
+                        enable_extended_filter: true,
+                    }) } else { None },
+                    gain_control: if settings.agc_enabled { Some(webrtc_audio_processing::GainControl {
+                        mode: webrtc_audio_processing::GainControlMode::AdaptiveDigital,
+                        target_level_dbfs: 3,
+                        compression_gain_db: 15,
+                        enable_limiter: true,
+                    }) } else { None },
+                    enable_high_pass_filter: true, 
+                    enable_transient_suppressor: true, 
+                    ..Default::default() 
+                });
 
             let params_in = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, window: WindowFunction::BlackmanHarris2, oversampling_factor: 256 };
             let params_out = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, window: WindowFunction::BlackmanHarris2, oversampling_factor: 256 };
@@ -206,19 +232,29 @@ impl AudioSession {
                         dsp_buf.extend_from_slice(&res[0]);
                         while dsp_buf.len() >= 480 {
                             let mut frame = dsp_buf.drain(0..480).collect::<Vec<_>>();
+                            
+                            // 1. Process Capture (Microphone -> Clean)
                             let _ = proc.process_capture_frame(&mut frame);
+                            
+                            // 2. Extra Denoise
                             let mut clean = [0.0f32; 480];
                             denoise.process_frame(&mut clean, &frame);
                             
+                            // 3. PTT Gate
                             let is_tx = state.is_transmitting.load(Ordering::Relaxed);
-                            
-                            if let Ok(res_o) = res_out.process(&[clean.to_vec()], None) {
+                            let output_frame = if is_tx { clean.to_vec() } else { vec![0.0; 480] };
+
+                            // 4. Feed Render (Speaker -> AEC Reference)
+                            // In a real VoIP app, this would be the incoming network audio.
+                            // Here in loopback, we feed our own output to simulate "speaker signal".
+                            // Important: We must clone because process_render_frame consumes or mutates.
+                            let mut render_copy = output_frame.clone(); 
+                            let _ = proc.process_render_frame(&mut render_copy);
+
+                            // 5. Output to Speaker
+                            if let Ok(res_o) = res_out.process(&[output_frame], None) {
                                 for &s in &res_o[0] { 
-                                    if is_tx {
-                                        let _ = prod_out.push(s); 
-                                    } else {
-                                        let _ = prod_out.push(0.0); // PTT Mute
-                                    }
+                                    let _ = prod_out.push(s); 
                                 }
                             }
                         }
@@ -243,7 +279,7 @@ fn main() -> anyhow::Result<()> {
     
     // --- SHARED STATE & INPUT HANDLING ---
     let global_state = Arc::new(GlobalAudioState { 
-        is_transmitting: AtomicBool::new(false) 
+        is_transmitting: AtomicBool::new(true) // Start transmitting by default
     });
 
     let input_state = global_state.clone();
@@ -298,7 +334,7 @@ fn main() -> anyhow::Result<()> {
     println!("==============================\n");
 
     // Prioritize "System Default" devices for better compatibility
-    let alt_mic = inputs.iter()
+    let _alt_mic = inputs.iter()
         .find(|d| d.id != "default" && d.display_name.contains("System Default") && (d.display_name.contains("Dahili") || d.display_name.contains("USB")))
         .or_else(|| inputs.iter().find(|d| d.id != "default" && (d.display_name.contains("Dahili") || d.display_name.contains("USB"))))
         .cloned()
@@ -317,7 +353,11 @@ fn main() -> anyhow::Result<()> {
     // We let the loop handle the first start to reuse logic
 
     loop {
-        let current_id = settings.lock().input_device_id.clone();
+        let (current_id, current_settings) = {
+            let s = settings.lock();
+            (s.input_device_id.clone(), s.clone())
+        };
+
         if current_id != last_id {
             if _session.is_some() {
                 println!("🛑 Closing old session...");
@@ -327,7 +367,7 @@ fn main() -> anyhow::Result<()> {
             // Wait for device to be released by OS/ALSA
             std::thread::sleep(Duration::from_millis(1000));
             
-            match AudioSession::create(&current_id, global_state.clone()) {
+            match AudioSession::create(&current_id, global_state.clone(), current_settings) {
                 Ok(s) => { _session = Some(s); last_id = current_id; println!("✅ Active."); } 
                 Err(e) => { 
                     println!("❌ Failed to open '{}': {:?}", current_id, e);
