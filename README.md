@@ -18,7 +18,33 @@ Required system libraries (Linux):
 - pkg-config
 - libssl-dev
 
+**Runtime Requirements:**
+- LiveKit Server (Cloud or Self-hosted)
+- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` environment variables
+
 ## Roadmap & Progress
+
+### Level 5: LiveKit Integration
+- [ ] Connect to Room
+- [ ] Publish Microphone Track
+- [ ] Receive/Mix Remote Audio
+- [ ] Handle Connection States
+
+### Level 4: Quality & Dynamics
+- [x] Automatic Gain Control (AGC)
+- [x] Peak Limiter
+- [x] Compressor
+
+### Level 3: Advanced DSP
+- [x] Noise Suppression (RNNoise + WebRTC VeryHigh)
+- [x] High-Pass Filter (HPF)
+- [x] Transient Suppressor (Anti-Click/Pop)
+- [x] Acoustic Echo Cancellation (AEC)
+
+### Level 2: Transmission Control
+- [x] Push-to-Talk (PTT) with Global Hotkeys
+- [x] Voice Activity Detection (VAD) / Noise Gate
+- [x] Configurable Gate Hold Time (Attack/Release)
 
 ### Level 1: Basic Management
 - [x] Fixed 48kHz Processing Pipeline
@@ -27,23 +53,9 @@ Required system libraries (Linux):
 - [x] Digital Input Gain Control
 - [x] Digital Output Gain Control
 
-### Level 2: Transmission Control
-- [x] Push-to-Talk (PTT) with Global Hotkeys
-- [x] Voice Activity Detection (VAD) / Noise Gate
-- [x] Configurable Gate Hold Time (Attack/Release)
+## Future Plans
 
-### Level 3: Advanced DSP
-- [x] Noise Suppression (RNNoise + WebRTC VeryHigh)
-- [x] High-Pass Filter (HPF)
-- [x] Transient Suppressor (Anti-Click/Pop)
-- [x] Acoustic Echo Cancellation (AEC)
-
-### Level 4: Quality & Dynamics
-- [x] Automatic Gain Control (AGC)
-- [x] Peak Limiter
-- [x] Compressor
-
-### Level 5: Spatial & Environmental
+### Spatial & Environmental
 - [ ] 3D/Positional Audio (Panning/Distance)
 - [ ] Dereverberation
 
