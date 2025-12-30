@@ -1,6 +1,7 @@
 {
   "name": "neandertal-voip-core",
   "dependencies": {
+    "dotenv": "^17.2.3",
     "livekit-server-sdk": "^2.15.0"
   }
 }

@@ -8,3 +8,4 @@ livekit.yaml
 docker-compose.yml
 docs/
 *.png
+*.mp4
