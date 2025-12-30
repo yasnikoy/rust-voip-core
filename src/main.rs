@@ -1,5 +1,3 @@
-#![allow(deprecated)] // TODO: Migrate from device.name() to device.id() / device.description() carefully
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +62,7 @@ fn get_professional_device_list(host: &cpal::Host) -> Vec<AudioDeviceInfo> {
 
     if let Ok(devices) = host.input_devices() {
         for device in devices {
+            #[allow(deprecated)]
             if let Ok(id) = device.name() {
                 let l_id = id.to_lowercase();
                 
@@ -133,6 +132,7 @@ impl AudioSession {
                 host.default_input_device().ok_or_else(|| anyhow::anyhow!("No mic found"))?
             } else {
                 let mut devices = host.input_devices()?;
+                #[allow(deprecated)]
                 let mut found = devices.find(|d| d.name().unwrap_or_default() == in_id);
                 
                 if found.is_none() {
@@ -141,9 +141,14 @@ impl AudioSession {
                         println!("⚠️ Exact match not found, trying fallback for card: '{}'", card_name);
                         // Re-acquire iterator as the previous one was consumed
                         let mut devices_retry = host.input_devices()?;
-                        found = devices_retry.find(|d| d.name().unwrap_or_default().contains(card_name));
+                        #[allow(deprecated)]
+                        {
+                            found = devices_retry.find(|d| d.name().unwrap_or_default().contains(card_name));
+                        }
                         if let Some(ref d) = found {
-                            println!("🔄 Fallback found: {}", d.name().unwrap_or_default());
+                            #[allow(deprecated)]
+                            let name = d.name().unwrap_or_default();
+                            println!("🔄 Fallback found: {}", name);
                         }
                     }
                 }
@@ -153,7 +158,9 @@ impl AudioSession {
                     None => {
                         println!("⚠️  Could not find '{}'. Available devices:", in_id);
                         for d in host.input_devices()? {
-                            println!("   - '{}'", d.name().unwrap_or_default());
+                            #[allow(deprecated)]
+                            let name = d.name().unwrap_or_default();
+                            println!("   - '{}'", name);
                         }
                         return Err(anyhow::anyhow!("Device not found: {}", in_id));
                     },

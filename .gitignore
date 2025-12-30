@@ -7,3 +7,4 @@ VoIP_Architecture_Report.md
 livekit.yaml
 docker-compose.yml
 docs/
+*.png
