@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
+use ringbuf::traits::*;
 use nnnoiseless::DenoiseState;
 use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSuppression, NoiseSuppressionLevel};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
@@ -161,8 +162,8 @@ impl AudioSession {
             let in_config = in_device.default_input_config()?;
             let out_config = out_device.default_output_config()?;
     
-            let in_sr = in_config.sample_rate().0 as f64;
-            let out_sr = out_config.sample_rate().0 as f64;
+            let in_sr = in_config.sample_rate() as f64;
+            let out_sr = out_config.sample_rate() as f64;
             let in_format = in_config.sample_format();
     
             println!("🎙️  Opening: {} ({}Hz, {:?})", in_id, in_sr, in_format);
@@ -173,10 +174,10 @@ impl AudioSession {
             let in_ch = in_config.channels() as usize;
             let _in_stream = match in_format {
                 cpal::SampleFormat::F32 => in_device.build_input_stream(&in_config.into(), move |data: &[f32], _| {
-                    for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0]); }
+                    for chunk in data.chunks(in_ch) { let _ = prod_in.try_push(chunk[0]); }
                 }, |_| {}, None)?,
                 cpal::SampleFormat::I16 => in_device.build_input_stream(&in_config.into(), move |data: &[i16], _| {
-                    for chunk in data.chunks(in_ch) { let _ = prod_in.push(chunk[0] as f32 / i16::MAX as f32); }
+                    for chunk in data.chunks(in_ch) { let _ = prod_in.try_push(chunk[0] as f32 / i16::MAX as f32); }
                 }, |_| {}, None)?,
                 _ => return Err(anyhow::anyhow!("Unsupported format")),
             };
@@ -184,7 +185,7 @@ impl AudioSession {
             let out_ch = out_config.channels() as usize;
             let _out_stream = out_device.build_output_stream(&out_config.into(), move |data: &mut [f32], _| {
                 for chunk in data.chunks_mut(out_ch) {
-                    let s = cons_out.pop().unwrap_or(0.0);
+                    let s = cons_out.try_pop().unwrap_or(0.0);
                     for ch in chunk.iter_mut() { *ch = s; }
                 }
             }, |_| {}, None)?;
@@ -225,9 +226,9 @@ impl AudioSession {
             let mut dsp_buf = Vec::new();
             loop {
                 let needed = res_in.input_frames_next();
-                if cons_in.len() >= needed {
+                if cons_in.occupied_len() >= needed {
                     let mut chunk = vec![0.0f32; needed];
-                    for s in chunk.iter_mut() { *s = cons_in.pop().unwrap(); }
+                    for s in chunk.iter_mut() { *s = cons_in.try_pop().unwrap(); }
                     if let Ok(res) = res_in.process(&[chunk], None) {
                         dsp_buf.extend_from_slice(&res[0]);
                         while dsp_buf.len() >= 480 {
@@ -254,7 +255,7 @@ impl AudioSession {
                             // 5. Output to Speaker
                             if let Ok(res_o) = res_out.process(&[output_frame], None) {
                                 for &s in &res_o[0] { 
-                                    let _ = prod_out.push(s); 
+                                    let _ = prod_out.try_push(s); 
                                 }
                             }
                         }
