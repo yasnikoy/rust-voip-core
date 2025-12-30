@@ -1,3 +1,5 @@
+#![allow(deprecated)] // TODO: Migrate from device.name() to device.id() / device.description() carefully
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
