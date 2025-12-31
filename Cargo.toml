@@ -23,3 +23,8 @@ xcap = "0.8.0"
 gstreamer = "0.24.4"
 gstreamer-app = "0.24.4"
 gstreamer-video = "0.24.4"
+
+# PipeWire screen capture (high-performance, DMA-BUF, 60+ FPS)
+ashpd = "0.12.0"
+lamco-portal = "0.3.0"
+lamco-pipewire = { version = "0.1.3", features = ["full"] }
