@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::os::fd::RawFd;
 use anyhow::Result;
 use tokio::sync::mpsc;
-use lamco_portal::{PortalManager, PortalConfig, PortalSessionHandle};
+use lamco_portal::{ScreenCastManager, PortalConfig, StreamInfo as PortalStreamInfo};
 use lamco_pipewire::{PipeWireManager, PipeWireConfig, StreamInfo, SourceType, PixelFormat};
 use livekit::webrtc::video_frame::{VideoFrame, I420Buffer};
 use livekit::webrtc::video_source::native::NativeVideoSource;
@@ -31,7 +31,6 @@ pub enum CaptureBackend {
 /// PipeWire-based screen share service
 pub struct PipeWireScreenShare {
     manager: PipeWireManager,
-    _portal_session: PortalSessionHandle,
     shutdown_tx: mpsc::Sender<()>,
 }
 
@@ -40,20 +39,26 @@ impl PipeWireScreenShare {
     /// 
     /// This will prompt the user to select a monitor/window via the portal dialog.
     pub async fn new(source: Arc<NativeVideoSource>) -> Result<Self> {
-        // 1. Create Portal manager with config
+        // 1. Create ScreenCast manager with config
         let config = PortalConfig::builder()
             .cursor_mode(CursorMode::Embedded) // Show cursor in stream
             .build();
         
-        let manager = PortalManager::new(config).await
-            .map_err(|e| anyhow::anyhow!("Portal init failed: {:?}", e))?;
+        // Create a dummy connection (ashpd creates its own internally)
+        let connection = zbus::Connection::session().await
+            .map_err(|e| anyhow::anyhow!("D-Bus connection failed: {:?}", e))?;
         
-        // This shows the "Select what to share" dialog
-        let (session, _restore_token) = manager.create_session("neandertal-screen".to_string(), None).await
+        let screencast = ScreenCastManager::new(connection, &config).await
+            .map_err(|e| anyhow::anyhow!("ScreenCast init failed: {:?}", e))?;
+        
+        // 2. Create session - this shows the portal picker dialog
+        let session = screencast.create_session().await
             .map_err(|e| anyhow::anyhow!("Session creation failed: {:?}", e))?;
         
-        // 2. Get PipeWire file descriptor and stream info
-        let streams = session.streams();
+        // 3. Start the screencast and get PipeWire details
+        let (fd, streams) = screencast.start(&session).await
+            .map_err(|e| anyhow::anyhow!("Screencast start failed: {:?}", e))?;
+        
         if streams.is_empty() {
             return Err(anyhow::anyhow!("No streams selected by user"));
         }
@@ -65,8 +70,9 @@ impl PipeWireScreenShare {
         
         println!("🖥️  PipeWire: Stream selected - Node {} ({}x{} @ {},{})", 
             node_id, width, height, x, y);
+        println!("📡 PipeWire FD: {}", fd);
         
-        // 3. Configure PipeWire manager for frame capture
+        // 4. Configure PipeWire manager for frame capture
         let pw_config = PipeWireConfig::builder()
             .buffer_count(4)
             .preferred_format(PixelFormat::BGRA)
@@ -79,12 +85,11 @@ impl PipeWireScreenShare {
         let mut pw_manager = PipeWireManager::new(pw_config)
             .map_err(|e| anyhow::anyhow!("PipeWire manager init failed: {:?}", e))?;
         
-        // 4. Connect to PipeWire using portal's file descriptor
-        let fd: RawFd = session.pipewire_fd();
+        // 5. Connect to PipeWire using portal's file descriptor
         pw_manager.connect(fd).await
             .map_err(|e| anyhow::anyhow!("PipeWire connect failed: {:?}", e))?;
         
-        // 5. Create stream
+        // 6. Create stream
         let stream_info = StreamInfo {
             node_id,
             position: (x, y),
@@ -95,7 +100,7 @@ impl PipeWireScreenShare {
         let handle = pw_manager.create_stream(&stream_info).await
             .map_err(|e| anyhow::anyhow!("Stream creation failed: {:?}", e))?;
         
-        // 6. Spawn frame processing task
+        // 7. Spawn frame processing task
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         
         if let Some(mut rx) = pw_manager.frame_receiver(handle.id).await {
@@ -140,7 +145,6 @@ impl PipeWireScreenShare {
         
         Ok(Self {
             manager: pw_manager,
-            _portal_session: session,
             shutdown_tx,
         })
     }

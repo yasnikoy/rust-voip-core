@@ -26,5 +26,6 @@ gstreamer-video = "0.24.4"
 
 # PipeWire screen capture (high-performance, DMA-BUF, 60+ FPS)
 ashpd = "0.12.0"
+zbus = "4.4"
 lamco-portal = "0.3.0"
 lamco-pipewire = { version = "0.1.3", features = ["full"] }
