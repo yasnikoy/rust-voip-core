@@ -65,8 +65,13 @@ async fn main() -> anyhow::Result<()> {
     println!("📡 Screen Track Published: {}", publication.sid());
 
     // Start Capture & Encode Pipeline
-    // We use monitor index 0 (Primary)
-    let _video_service = video_service::ScreenShareService::new(0, Arc::new(screen_source));
+    // We use monitor index 0 (Primary), Software encoding, 720p target
+    let _video_service = video_service::ScreenShareService::new(
+        0, 
+        Arc::new(screen_source),
+        video_service::EncodingMode::Software,
+        (1280, 720) // 720p - good balance of quality and performance
+    );
 
     match _video_service {
         Ok(_) => println!("🎥 Screen Share Service Running (GStreamer -> LiveKit)"),
