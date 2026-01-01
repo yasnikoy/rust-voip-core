@@ -15,6 +15,14 @@ pub mod pipewire_capture;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod nvfbc_capture;
 
+// GPU-accelerated color conversion (Linux with OpenGL)
+#[cfg(target_os = "linux")]
+pub mod gpu_color_convert;
+
+// NVFBC with GPU color conversion (highest performance)
+#[cfg(target_os = "linux")]
+pub mod nvfbc_gpu_capture;
+
 /// Platform detection helper
 pub fn platform_info() -> &'static str {
     #[cfg(target_os = "linux")]
