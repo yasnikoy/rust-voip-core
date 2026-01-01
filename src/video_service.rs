@@ -300,10 +300,54 @@ mod tests {
 
     #[test]
     fn test_align_to_16() {
-        assert_eq!(align_to_16(1920), 1920); // Already aligned
-        assert_eq!(align_to_16(1080), 1088); // Needs alignment
-        assert_eq!(align_to_16(854), 864);   // 854 -> 864
+        assert_eq!(align_to_16(1920), 1920); // Already aligned (1080p width)
+        assert_eq!(align_to_16(1080), 1088); // Needs alignment (1080p height)
+        assert_eq!(align_to_16(854), 864);   // 854 → 864
         assert_eq!(align_to_16(480), 480);   // Already aligned
-        assert_eq!(align_to_16(720), 720);   // Already aligned
+        assert_eq!(align_to_16(720), 720);   // Already aligned (720p height)
+    }
+
+    #[test]
+    fn test_align_edge_cases() {
+        assert_eq!(align_to_16(0), 0);       // Zero
+        assert_eq!(align_to_16(1), 16);      // Minimum non-zero
+        assert_eq!(align_to_16(15), 16);     // Just under boundary
+        assert_eq!(align_to_16(16), 16);     // Exact boundary
+        assert_eq!(align_to_16(17), 32);     // Just over boundary
+    }
+
+    #[test]
+    fn test_common_resolutions() {
+        // 4K UHD
+        assert_eq!(align_to_16(3840), 3840);
+        assert_eq!(align_to_16(2160), 2160);
+        
+        // 1080p
+        assert_eq!(align_to_16(1920), 1920);
+        assert_eq!(align_to_16(1080), 1088);
+        
+        // 720p
+        assert_eq!(align_to_16(1280), 1280);
+        assert_eq!(align_to_16(720), 720);
+        
+        // 480p
+        assert_eq!(align_to_16(854), 864);
+        assert_eq!(align_to_16(480), 480);
+    }
+
+    #[test]
+    fn test_vaapi_alignment_constant() {
+        assert_eq!(VAAPI_ALIGNMENT, 16);
+        
+        // Verify alignment formula works correctly
+        let value = 1080u32;
+        let aligned = (value + (VAAPI_ALIGNMENT - 1)) & !(VAAPI_ALIGNMENT - 1);
+        assert_eq!(aligned, 1088);
+    }
+
+    #[test]
+    fn test_const_values() {
+        assert_eq!(TARGET_FPS, 60);
+        assert_eq!(VAAPI_ALIGNMENT, 16);
     }
 }

@@ -199,4 +199,37 @@ mod tests {
         // I420: Y + U/4 + V/4 = 1.5 * width * height
         assert_eq!(total, (width * height * 3) / 2);
     }
+
+    #[test]
+    fn test_bgra_buffer_size() {
+        let width = 1280u32;
+        let height = 720u32;
+        let expected = (width * height * BGRA_BYTES_PER_PIXEL) as usize;
+        
+        assert_eq!(expected, 1280 * 720 * 4);
+        assert_eq!(expected, 3_686_400);
+    }
+
+    #[test]
+    fn test_copy_i420_data_bounds() {
+        let width = 640u32;
+        let height = 480u32;
+        
+        let y_size = (width * height) as usize;
+        let uv_size = (width * height / 4) as usize;
+        let total_size = y_size + uv_size * 2;
+        
+        let data = vec![0u8; total_size];
+        let mut buffer = I420Buffer::new(width, height);
+        
+        // Should not panic
+        copy_i420_data(&data, width, height, &mut buffer);
+    }
+
+    #[test]
+    fn test_const_values() {
+        assert_eq!(TARGET_FPS, 60);
+        assert_eq!(MAX_BUFFERS, 2);
+        assert_eq!(BGRA_BYTES_PER_PIXEL, 4);
+    }
 }
