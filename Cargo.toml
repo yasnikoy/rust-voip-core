@@ -29,3 +29,7 @@ ashpd = "0.12.0"
 zbus = "4.4"
 lamco-portal = "0.3.0"
 lamco-pipewire = { version = "0.1.3", features = ["full"] }
+
+# X11 High-performance capture alternatives
+nvfbc = "0.2.0"  # NVIDIA Frame Buffer Capture (60+ FPS)
+drm = "0.14.1"   # KMS/DRM capture for Intel/AMD/NVIDIA
