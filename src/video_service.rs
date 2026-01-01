@@ -59,10 +59,9 @@ impl ScreenShareService {
         let monitor = monitors.get(monitor_index)
             .ok_or_else(|| anyhow::anyhow!("Monitor index {} not found (available: {})", monitor_index, monitors.len()))?;
         
-        let native_width = monitor.width()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get monitor width"))?;
-        let native_height = monitor.height()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get monitor height"))?;
+        // xcap's width() and height() return Option<u32>
+        let native_width = monitor.width().unwrap_or(1920);
+        let native_height = monitor.height().unwrap_or(1080);
 
         // 4. Determine target resolution (aligned to 16 for VAAPI compatibility)
         let (target_width, target_height) = if target_resolution.0 == 0 || target_resolution.1 == 0 {
@@ -73,7 +72,7 @@ impl ScreenShareService {
         };
 
         log::info!("🖥️  Screen Share: {} ({}x{}) → {}x{} [{:?}]", 
-            monitor.name().unwrap_or_else(|| "Unknown".into()), 
+            monitor.name().unwrap_or("Unknown".to_string()), 
             native_width, native_height,
             target_width, target_height,
             mode
