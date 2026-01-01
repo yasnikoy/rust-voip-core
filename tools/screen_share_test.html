@@ -439,7 +439,10 @@
                 document.getElementById('share-status').textContent = '● Bağlanıyor...';
                 log('share-log', 'Bağlanılıyor...', 'info');
 
-                shareRoom = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+                shareRoom = new LivekitClient.Room({
+                    adaptiveStream: false,  // Disable to prevent FPS throttling
+                    dynacast: false         // Disable dynamic broadcasting
+                });
                 await shareRoom.connect(url, token);
                 log('share-log', `Oda: ${shareRoom.name}`, 'success');
 
@@ -531,7 +534,10 @@
                 document.getElementById('view-status').textContent = '● Bağlanıyor...';
                 log('view-log', 'Bağlanılıyor...', 'info');
 
-                viewRoom = new LivekitClient.Room();
+                viewRoom = new LivekitClient.Room({
+                    adaptiveStream: false,  // Disable to receive full FPS
+                    dynacast: false
+                });
                 await viewRoom.connect(url, token);
                 log('view-log', `Oda: ${viewRoom.name}`, 'success');
 
