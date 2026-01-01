@@ -23,6 +23,10 @@ pub mod gpu_color_convert;
 #[cfg(target_os = "linux")]
 pub mod nvfbc_gpu_capture;
 
+// Low-power NVFBC capture (for laptops like Acer E5-571G)
+#[cfg(target_os = "linux")]
+pub mod nvfbc_lowpower;
+
 /// Platform detection helper
 pub fn platform_info() -> &'static str {
     #[cfg(target_os = "linux")]
