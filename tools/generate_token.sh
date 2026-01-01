@@ -12,6 +12,12 @@ echo "=========================="
 echo "Room: $ROOM"
 echo ""
 
+# Check if LiveKit container is available
+if ! docker run --rm livekit/livekit-server:latest --help &>/dev/null; then
+    echo "❌ Docker veya LiveKit image bulunamadı!"
+    exit 1
+fi
+
 # Publisher Token (can publish and subscribe)
 echo "📤 Publisher Token (ekran paylaşımı için):"
 echo "   Identity: publisher-$TIMESTAMP"
@@ -22,28 +28,30 @@ PUBLISHER_TOKEN=$(docker run --rm livekit/livekit-server:latest create-join-toke
 
 if [ -z "$PUBLISHER_TOKEN" ]; then
     echo "❌ Token oluşturulamadı!"
-    echo "   LiveKit container çalıştığından emin olun:"
-    echo "   docker compose up -d"
+    echo "   LiveKit container çalıştırılıyor mu?"
     exit 1
 fi
 
 echo "$PUBLISHER_TOKEN"
 echo ""
 
-# Viewer Token (can only subscribe)
+# Viewer Token (same permissions - no recorder flag to avoid FPS limits)
+# NOTE: --recorder flag causes low FPS issues, so we use regular token
 echo "📥 Viewer Token (izlemek için):"
 echo "   Identity: viewer-$TIMESTAMP"
 VIEWER_TOKEN=$(docker run --rm livekit/livekit-server:latest create-join-token \
     --room "$ROOM" \
     --identity "viewer-$TIMESTAMP" \
-    --recorder \
     --keys "change_me: change_me" 2>/dev/null | grep "Token:" | cut -d' ' -f2)
 
 echo "$VIEWER_TOKEN"
 echo ""
 echo "✅ Tokenlar oluşturuldu!"
 echo ""
+echo "⚠️  NOT: Her iki token da aynı izinlere sahip."
+echo "   Güvenlik için production'da farklı izinler kullanın."
+echo ""
 echo "🌐 Test aracını açmak için:"
 echo "   xdg-open tools/screen_share_test.html  # Linux"
-echo "   open tools/screen_share_test.html      # macOS"
+echo "   open tools/screen_share_test.html      # macOS"  
 echo "   start tools/screen_share_test.html     # Windows"
