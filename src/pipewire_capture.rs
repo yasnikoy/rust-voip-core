@@ -9,10 +9,9 @@
 //! - Supports up to 144Hz refresh rates
 
 use std::sync::Arc;
-use std::os::fd::RawFd;
 use anyhow::Result;
 use tokio::sync::mpsc;
-use lamco_portal::{ScreenCastManager, PortalConfig, StreamInfo as PortalStreamInfo};
+use lamco_portal::{ScreenCastManager, PortalConfig};
 use lamco_pipewire::{PipeWireManager, PipeWireConfig, StreamInfo, SourceType, PixelFormat};
 use livekit::webrtc::video_frame::{VideoFrame, I420Buffer};
 use livekit::webrtc::video_source::native::NativeVideoSource;
