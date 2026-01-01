@@ -454,7 +454,15 @@
                 document.getElementById('localVideo').srcObject = stream;
                 document.getElementById('localPlaceholder').style.display = 'none';
 
-                localTrack = await shareRoom.localParticipant.publishTrack(stream.getVideoTracks()[0], {
+                // IMPORTANT: Set contentHint to 'motion' to prevent encoder from
+                // throttling FPS (default 'text' mode limits to ~15 FPS for static content)
+                const videoTrack = stream.getVideoTracks()[0];
+                if ('contentHint' in videoTrack) {
+                    videoTrack.contentHint = 'motion';
+                    log('share-log', '✓ contentHint = motion (yüksek FPS modu)', 'success');
+                }
+
+                localTrack = await shareRoom.localParticipant.publishTrack(videoTrack, {
                     source: LivekitClient.Track.Source.ScreenShare,
                     simulcast: false,
                     videoEncoding: { maxBitrate: 3_000_000, maxFramerate: fps }
