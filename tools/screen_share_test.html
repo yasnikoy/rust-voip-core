@@ -326,8 +326,10 @@
                 <div class="stats-panel">
                     <div class="status disconnected" id="share-status">● Bağlı Değil</div>
                     <h4 style="margin-bottom: 10px;">📊 Yayın İstatistikleri</h4>
-                    <div class="stat-item"><span class="stat-label">FPS</span><span class="stat-value"
-                            id="share-fps">-</span></div>
+                    <div class="stat-item"><span class="stat-label">Capture FPS</span><span class="stat-value"
+                            id="share-capture-fps">-</span></div>
+                    <div class="stat-item"><span class="stat-label">Encoder FPS</span><span class="stat-value"
+                            id="share-encoder-fps">-</span></div>
                     <div class="stat-item"><span class="stat-label">Çözünürlük</span><span class="stat-value"
                             id="share-res">-</span></div>
                     <div class="stat-item"><span class="stat-label">Bitrate</span><span class="stat-value"
@@ -505,8 +507,11 @@
                 const track = stream.getVideoTracks()[0];
                 if (track) {
                     const s = track.getSettings();
-                    document.getElementById('share-fps').textContent = Math.round(s.frameRate || 0) + ' FPS';
-                    document.getElementById('share-res').textContent = `${s.width}x${s.height}`;
+                    // Capture FPS (what the screen capture is providing)
+                    const captureFps = Math.round(s.frameRate || 0);
+                    const captureFpsEl = document.getElementById('share-capture-fps');
+                    captureFpsEl.textContent = captureFps + ' FPS';
+                    captureFpsEl.className = 'stat-value ' + (captureFps >= 25 ? 'good' : captureFps >= 15 ? 'warn' : 'bad');
                 }
 
                 const pc = shareRoom?.engine?.pcManager?.publisher?.pc;
@@ -515,12 +520,10 @@
                     stats.forEach(r => {
                         if (r.type === 'outbound-rtp' && r.kind === 'video') {
                             // Encoder output FPS (what's actually being sent)
-                            if (r.framesPerSecond) {
-                                const encoderFps = r.framesPerSecond;
-                                const fpsEl = document.getElementById('share-fps');
-                                fpsEl.textContent = Math.round(encoderFps) + ' FPS (encoded)';
-                                fpsEl.className = 'stat-value ' + (encoderFps >= 25 ? 'good' : encoderFps >= 15 ? 'warn' : 'bad');
-                            }
+                            const encoderFps = r.framesPerSecond || 0;
+                            const encoderFpsEl = document.getElementById('share-encoder-fps');
+                            encoderFpsEl.textContent = Math.round(encoderFps) + ' FPS';
+                            encoderFpsEl.className = 'stat-value ' + (encoderFps >= 25 ? 'good' : encoderFps >= 15 ? 'warn' : 'bad');
 
                             // Bitrate
                             if (shareLastTime > 0) {
