@@ -7,6 +7,17 @@
 //! - **Linux**: NVFBC, PipeWire Portal, xcap
 //! - **Windows**: NVFBC, DXGI Desktop Duplication
 //! - **macOS**: xcap (`SCStreamOutput`)
+//!
+//! # Examples
+//!
+//! ## Check platform and recommended backend
+//! ```
+//! use neandertal_voip_core::{platform_info, recommended_capture_backend};
+//!
+//! let platform = platform_info();
+//! let backend = recommended_capture_backend();
+//! println!("Running on {platform}, recommended backend: {backend}");
+//! ```
 
 // Cross-platform modules
 pub mod audio_service;
@@ -33,6 +44,14 @@ pub mod nvfbc_gpu_capture;
 pub mod nvfbc_lowpower;
 
 /// Platform detection helper (compile-time constant)
+///
+/// # Examples
+/// ```
+/// use neandertal_voip_core::platform_info;
+///
+/// let platform = platform_info();
+/// assert!(["Linux", "Windows", "macOS", "Unknown"].contains(&platform));
+/// ```
 #[must_use]
 pub const fn platform_info() -> &'static str {
     #[cfg(target_os = "linux")]
@@ -58,8 +77,21 @@ pub const fn platform_info() -> &'static str {
 
 /// Get recommended capture backend for current platform
 ///
+/// Automatically selects the best available capture method based on:
+/// - **Linux**: NVFBC (if NVIDIA GPU available) > xcap
+/// - **Windows**: xcap (DXGI Desktop Duplication)
+/// - **macOS**: xcap (`SCStreamOutput`)
+///
 /// # Returns
 /// A static string describing the best capture backend for this platform
+///
+/// # Examples
+/// ```
+/// use neandertal_voip_core::recommended_capture_backend;
+///
+/// let backend = recommended_capture_backend();
+/// println!("Using: {backend}");
+/// ```
 #[must_use]
 pub fn recommended_capture_backend() -> &'static str {
     #[cfg(target_os = "windows")]
