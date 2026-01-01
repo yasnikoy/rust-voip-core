@@ -506,6 +506,15 @@
                     const stats = await pc.getStats();
                     stats.forEach(r => {
                         if (r.type === 'outbound-rtp' && r.kind === 'video') {
+                            // Encoder output FPS (what's actually being sent)
+                            if (r.framesPerSecond) {
+                                const encoderFps = r.framesPerSecond;
+                                const fpsEl = document.getElementById('share-fps');
+                                fpsEl.textContent = Math.round(encoderFps) + ' FPS (encoded)';
+                                fpsEl.className = 'stat-value ' + (encoderFps >= 25 ? 'good' : encoderFps >= 15 ? 'warn' : 'bad');
+                            }
+
+                            // Bitrate
                             if (shareLastTime > 0) {
                                 const br = ((r.bytesSent - shareLastBytes) * 8) / ((r.timestamp - shareLastTime) / 1000) / 1000;
                                 document.getElementById('share-bitrate').textContent = br > 1000 ? (br / 1000).toFixed(1) + ' Mbps' : Math.round(br) + ' kbps';
@@ -513,6 +522,11 @@
                             shareLastBytes = r.bytesSent;
                             shareLastTime = r.timestamp;
                             document.getElementById('share-bytes').textContent = (r.bytesSent / 1024 / 1024).toFixed(1) + ' MB';
+
+                            // Resolution from encoder
+                            if (r.frameWidth && r.frameHeight) {
+                                document.getElementById('share-res').textContent = `${r.frameWidth}x${r.frameHeight}`;
+                            }
                         }
                         if (r.type === 'codec' && r.mimeType?.includes('video')) {
                             document.getElementById('share-codec').textContent = r.mimeType.split('/')[1].toUpperCase();
@@ -595,15 +609,31 @@
                 const stats = await track.getRTCStatsReport();
                 stats.forEach(r => {
                     if (r.type === 'inbound-rtp' && r.kind === 'video') {
-                        document.getElementById('view-fps').textContent = (r.framesPerSecond || 0).toFixed(1) + ' FPS';
+                        // Decoded FPS
+                        const fps = r.framesPerSecond || 0;
+                        const fpsEl = document.getElementById('view-fps');
+                        fpsEl.textContent = fps.toFixed(1) + ' FPS (decoded)';
+                        fpsEl.className = 'stat-value ' + (fps >= 25 ? 'good' : fps >= 15 ? 'warn' : 'bad');
+
+                        // Packet loss
                         document.getElementById('view-loss').textContent = r.packetsLost || 0;
 
+                        // Bitrate
                         if (viewLastTime > 0) {
                             const br = ((r.bytesReceived - viewLastBytes) * 8) / ((r.timestamp - viewLastTime) / 1000) / 1000;
                             document.getElementById('view-bitrate').textContent = br > 1000 ? (br / 1000).toFixed(1) + ' Mbps' : Math.round(br) + ' kbps';
                         }
                         viewLastBytes = r.bytesReceived;
                         viewLastTime = r.timestamp;
+
+                        // Log if FPS is unexpectedly low
+                        if (fps > 0 && fps < 20 && !window.lowFpsWarned) {
+                            log('view-log', `⚠️ Düşük FPS: ${fps.toFixed(1)} - Publisher encode FPS kontrol edin`, 'error');
+                            window.lowFpsWarned = true;
+                        }
+                    }
+                    if (r.type === 'codec' && r.mimeType?.includes('video')) {
+                        document.getElementById('view-codec').textContent = r.mimeType.split('/')[1].toUpperCase();
                     }
                 });
             }, 1000);
