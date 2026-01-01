@@ -9,6 +9,12 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 use xcap::Monitor;
 use tokio::sync::mpsc;
 
+/// Target FPS for screen capture
+const TARGET_FPS: i32 = 60;
+
+/// Alignment requirement for VAAPI/video encoding (must be multiple of 16)
+const VAAPI_ALIGNMENT: u32 = 16;
+
 /// Screen share encoding mode
 #[derive(Clone, Copy, Debug)]
 pub enum EncodingMode {
@@ -48,12 +54,15 @@ impl ScreenShareService {
         gst::init()?;
 
         // 3. Select Monitor
-        let monitors = Monitor::all()?;
+        let monitors = Monitor::all()
+            .map_err(|e| anyhow::anyhow!("Failed to enumerate monitors: {}", e))?;
         let monitor = monitors.get(monitor_index)
-            .ok_or_else(|| anyhow::anyhow!("Monitor index {} not found", monitor_index))?;
+            .ok_or_else(|| anyhow::anyhow!("Monitor index {} not found (available: {})", monitor_index, monitors.len()))?;
         
-        let native_width = monitor.width().unwrap_or(1920);
-        let native_height = monitor.height().unwrap_or(1080);
+        let native_width = monitor.width()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get monitor width"))?;
+        let native_height = monitor.height()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get monitor height"))?;
 
         // 4. Determine target resolution (aligned to 16 for VAAPI compatibility)
         let (target_width, target_height) = if target_resolution.0 == 0 || target_resolution.1 == 0 {
@@ -63,8 +72,8 @@ impl ScreenShareService {
             (align_to_16(target_resolution.0), align_to_16(target_resolution.1))
         };
 
-        println!("🖥️  Screen Share: {} ({}x{}) → {}x{} [{:?}]", 
-            monitor.name().unwrap_or("Unknown".into()), 
+        log::info!("🖥️  Screen Share: {} ({}x{}) → {}x{} [{:?}]", 
+            monitor.name().unwrap_or_else(|| "Unknown".into()), 
             native_width, native_height,
             target_width, target_height,
             mode
@@ -120,7 +129,7 @@ impl ScreenShareService {
             .field("format", "BGRA")
             .field("width", native_width as i32)
             .field("height", native_height as i32)
-            .field("framerate", gst::Fraction::new(60, 1))
+            .field("framerate", gst::Fraction::new(TARGET_FPS, 1))
             .build();
         appsrc.set_caps(Some(&caps));
 
@@ -281,8 +290,9 @@ impl ScreenShareService {
 }
 
 /// Align value to nearest multiple of 16 (required for VAAPI/video encoding)
-fn align_to_16(value: u32) -> u32 {
-    (value + 15) & !15
+#[must_use]
+const fn align_to_16(value: u32) -> u32 {
+    (value + (VAAPI_ALIGNMENT - 1)) & !(VAAPI_ALIGNMENT - 1)
 }
 
 #[cfg(test)]
