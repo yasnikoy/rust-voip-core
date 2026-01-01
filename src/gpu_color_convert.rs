@@ -7,11 +7,18 @@ use anyhow::Result;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use gstreamer_video as gst_video;
 use livekit::webrtc::video_frame::{VideoFrame, I420Buffer};
 use livekit::webrtc::video_source::native::NativeVideoSource;
-use parking_lot::Mutex;
 use std::sync::Arc;
+
+/// Target framerate for GPU color conversion
+const TARGET_FPS: i32 = 60;
+
+/// Maximum buffers in appsink queue
+const MAX_BUFFERS: u32 = 2;
+
+/// BGRA bytes per pixel
+const BGRA_BYTES_PER_PIXEL: u32 = 4;
 
 /// GPU-accelerated color converter using GStreamer
 pub struct GpuColorConverter {
@@ -23,20 +30,23 @@ pub struct GpuColorConverter {
 
 impl GpuColorConverter {
     /// Create a new GPU color converter
-    /// 
-    /// Pipeline: appsrc (BGRA) -> glupload -> glcolorconvert -> gldownload -> appsink (I420)
+    ///
+    /// # Errors
+    /// Returns error if GStreamer initialization fails or pipeline cannot be created
+    ///
+    /// # Pipeline
+    /// appsrc (BGRA) → glupload → glcolorconvert → gldownload → appsink (I420)
     pub fn new(width: u32, height: u32, source: Arc<NativeVideoSource>) -> Result<Self> {
         gst::init()?;
 
         // Try OpenGL first, fall back to software if not available
         let pipeline_str = format!(
-            "appsrc name=src format=time caps=video/x-raw,format=BGRA,width={},height={},framerate=60/1 ! \
+            "appsrc name=src format=time caps=video/x-raw,format=BGRA,width={width},height={height},framerate={TARGET_FPS}/1 ! \
              glupload ! \
              glcolorconvert ! \
              gldownload ! \
              video/x-raw,format=I420 ! \
-             appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true",
-            width, height
+             appsink name=sink emit-signals=true sync=false max-buffers={MAX_BUFFERS} drop=true"
         );
 
         let pipeline = gst::parse::launch(&pipeline_str)?
@@ -56,9 +66,9 @@ impl GpuColorConverter {
             .map_err(|_| anyhow::anyhow!("Failed to get appsink"))?;
 
         // Set up appsink callback
-        let source_clone = source.clone();
-        let w = width;
-        let h = height;
+        let source_clone = Arc::clone(&source);
+        let frame_width = width;
+        let frame_height = height;
         
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
@@ -71,14 +81,14 @@ impl GpuColorConverter {
                     let i420_data = map.as_slice();
                     
                     // Create I420Buffer and copy data
-                    let mut i420_buf = I420Buffer::new(w, h);
-                    copy_i420_data(i420_data, w, h, &mut i420_buf);
+                    let mut i420_buf = I420Buffer::new(frame_width, frame_height);
+                    copy_i420_data(i420_data, frame_width, frame_height, &mut i420_buf);
                     
                     // Create and send frame
                     let timestamp_us = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as i64;
+                        .map(|d| d.as_micros() as i64)
+                        .unwrap_or(0);
                     
                     let mut video_frame = VideoFrame {
                         buffer: i420_buf,
@@ -96,7 +106,7 @@ impl GpuColorConverter {
         // Start pipeline
         pipeline.set_state(gst::State::Playing)?;
 
-        println!("🎨 GPU Color Converter: OpenGL BGRA→I420 pipeline started");
+        log::info!("🎨 GPU Color Converter: OpenGL BGRA→I420 pipeline started ({}x{})", width, height);
 
         Ok(Self {
             pipeline,
@@ -107,8 +117,11 @@ impl GpuColorConverter {
     }
 
     /// Push a BGRA frame for conversion
+    ///
+    /// # Errors
+    /// Returns error if buffer size is invalid or GStreamer push fails
     pub fn push_bgra_frame(&self, bgra_data: &[u8]) -> Result<()> {
-        let expected_size = (self.width * self.height * 4) as usize;
+        let expected_size = (self.width * self.height * BGRA_BYTES_PER_PIXEL) as usize;
         if bgra_data.len() != expected_size {
             return Err(anyhow::anyhow!(
                 "Invalid buffer size: {} expected {}",
@@ -119,19 +132,23 @@ impl GpuColorConverter {
 
         let mut buffer = gst::Buffer::with_size(expected_size)?;
         {
-            let buffer_ref = buffer.get_mut().unwrap();
+            let buffer_ref = buffer.get_mut()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get mutable buffer reference"))?;
             let mut map = buffer_ref.map_writable()?;
             map.copy_from_slice(bgra_data);
         }
 
-        self.appsrc.push_buffer(buffer)?;
+        self.appsrc.push_buffer(buffer)
+            .map_err(|e| anyhow::anyhow!("Failed to push buffer: {:?}", e))?;
         Ok(())
     }
 
     /// Shutdown the converter
     pub fn shutdown(&self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
-        println!("🎨 GPU Color Converter: Shutdown");
+        if let Err(e) = self.pipeline.set_state(gst::State::Null) {
+            log::warn!("Failed to stop GPU converter pipeline: {:?}", e);
+        }
+        log::info!("🎨 GPU Color Converter: Shutdown");
     }
 }
 
