@@ -1,7 +1,12 @@
-//! Neandertal VoIP Core
-//! 
+//! Neandertal `VoIP` Core
+//!
 //! High-performance audio and video streaming library.
 //! Supports Linux (X11/Wayland) and Windows.
+//!
+//! # Platform Support
+//! - **Linux**: NVFBC, PipeWire Portal, xcap
+//! - **Windows**: NVFBC, DXGI Desktop Duplication
+//! - **macOS**: xcap (`SCStreamOutput`)
 
 // Cross-platform modules
 pub mod audio_service;
@@ -27,29 +32,42 @@ pub mod nvfbc_gpu_capture;
 #[cfg(target_os = "linux")]
 pub mod nvfbc_lowpower;
 
-/// Platform detection helper
-pub fn platform_info() -> &'static str {
+/// Platform detection helper (compile-time constant)
+#[must_use]
+pub const fn platform_info() -> &'static str {
     #[cfg(target_os = "linux")]
-    { "Linux" }
-    
+    {
+        "Linux"
+    }
+
     #[cfg(target_os = "windows")]
-    { "Windows" }
-    
+    {
+        "Windows"
+    }
+
     #[cfg(target_os = "macos")]
-    { "macOS" }
-    
+    {
+        "macOS"
+    }
+
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    { "Unknown" }
+    {
+        "Unknown"
+    }
 }
 
 /// Get recommended capture backend for current platform
+///
+/// # Returns
+/// A static string describing the best capture backend for this platform
+#[must_use]
 pub fn recommended_capture_backend() -> &'static str {
     #[cfg(target_os = "windows")]
     {
         // Windows: xcap uses DXGI Desktop Duplication (60+ FPS)
         "xcap (DXGI)"
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         // Linux: Try NVFBC first, then PipeWire, then xcap
@@ -59,12 +77,12 @@ pub fn recommended_capture_backend() -> &'static str {
             "xcap (X11/Wayland, ~30 FPS)"
         }
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         "xcap (SCStreamOutput, 60+ FPS)"
     }
-    
+
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         "xcap (fallback)"
