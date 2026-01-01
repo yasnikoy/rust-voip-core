@@ -2,7 +2,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use parking_lot::Mutex;
 use ringbuf::HeapRb;
-use ringbuf::traits::*;
+use ringbuf::traits::{Split, Producer, Consumer, Observer};
 use nnnoiseless::DenoiseState;
 use webrtc_audio_processing::{Processor, InitializationConfig, Config, NoiseSuppression, NoiseSuppressionLevel};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
@@ -10,6 +10,7 @@ use std::time::Duration;
 use rdev::{listen, Event, EventType, Key};
 
 // --- MODELS ---
+
 
 #[derive(Clone, Debug)]
 pub struct AudioDeviceInfo {

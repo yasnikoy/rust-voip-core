@@ -17,6 +17,9 @@ use livekit::webrtc::video_frame::{VideoFrame, I420Buffer};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use ashpd::desktop::screencast::CursorMode;
 
+/// Frames between FPS reports for PipeWire capture
+const FPS_REPORT_INTERVAL: u64 = 300;
+
 /// Capture backend selection
 #[derive(Clone, Copy, Debug, Default)]
 pub enum CaptureBackend {
@@ -67,9 +70,9 @@ impl PipeWireScreenShare {
         let (width, height) = stream.size;
         let (x, y) = stream.position;
         
-        println!("🖥️  PipeWire: Stream selected - Node {} ({}x{} @ {},{})", 
+        log::info!("🖥️  PipeWire: Stream selected - Node {} ({}x{} @ {},{})", 
             node_id, width, height, x, y);
-        println!("📡 PipeWire FD: {}", fd);
+        log::info!("📡 PipeWire FD: {}", fd);
         
         // 4. Configure PipeWire manager for frame capture
         let pw_config = PipeWireConfig::builder()
@@ -92,7 +95,7 @@ impl PipeWireScreenShare {
         let stream_info = StreamInfo {
             node_id,
             position: (x, y),
-            size: (width as u32, height as u32),
+            size: (width, height),
             source_type: SourceType::Monitor,
         };
         
@@ -103,9 +106,9 @@ impl PipeWireScreenShare {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         
         if let Some(mut rx) = pw_manager.frame_receiver(handle.id).await {
-            let source_clone = source.clone();
-            let target_width = width as u32;
-            let target_height = height as u32;
+            let source_clone = Arc::clone(&source);
+            let target_width = width;
+            let target_height = height;
             
             tokio::spawn(async move {
                 let mut frame_count = 0u64;
@@ -122,17 +125,17 @@ impl PipeWireScreenShare {
                                 target_width,
                                 target_height,
                             ) {
-                                eprintln!("Frame processing error: {}", e);
+                                log::error!("Frame processing error: {}", e);
                             }
                             
                             frame_count += 1;
-                            if frame_count % 300 == 0 {
+                            if frame_count.is_multiple_of(FPS_REPORT_INTERVAL) {
                                 let fps = frame_count as f64 / start.elapsed().as_secs_f64();
-                                println!("📹 PipeWire: {} frames, {:.1} FPS avg", frame_count, fps);
+                                log::info!("📹 PipeWire: {} frames, {:.1} FPS avg", frame_count, fps);
                             }
                         }
                         _ = shutdown_rx.recv() => {
-                            println!("📹 PipeWire: Shutdown signal received");
+                            log::info!("📹 PipeWire: Shutdown signal received");
                             break;
                         }
                     }
@@ -140,7 +143,7 @@ impl PipeWireScreenShare {
             });
         }
         
-        println!("✅ PipeWire screen share started");
+        log::info!("✅ PipeWire screen share started");
         
         Ok(Self {
             manager: pw_manager,
@@ -162,8 +165,8 @@ impl PipeWireScreenShare {
         // Create VideoFrame
         let timestamp_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or(0);
         
         let mut video_frame = VideoFrame {
             buffer: i420_buf,
@@ -185,60 +188,82 @@ impl PipeWireScreenShare {
     }
 }
 
-/// Convert BGRA to I420
-/// 
+// Color conversion constants (BT.601)
+const YUV_Y_R_COEF: i32 = 66;
+const YUV_Y_G_COEF: i32 = 129;
+const YUV_Y_B_COEF: i32 = 25;
+const YUV_U_R_COEF: i32 = -38;
+const YUV_U_G_COEF: i32 = -74;
+const YUV_U_B_COEF: i32 = 112;
+const YUV_V_R_COEF: i32 = 112;
+const YUV_V_G_COEF: i32 = -94;
+const YUV_V_B_COEF: i32 = -18;
+const YUV_ROUNDING: i32 = 128;
+const YUV_SHIFT: i32 = 8;
+const YUV_Y_OFFSET: i32 = 16;
+const YUV_UV_OFFSET: i32 = 128;
+
+/// BGRA pixel indices
+const BGRA_B: usize = 0;
+const BGRA_G: usize = 1;
+const BGRA_R: usize = 2;
+const BYTES_PER_PIXEL: usize = 4;
+
+/// Convert BGRA to I420 (BT.601 color space)
+///
 /// I420 format: Y plane (full res) + U plane (half res) + V plane (half res)
+/// Processes 2x2 pixel blocks for chroma subsampling.
 fn bgra_to_i420(bgra: &[u8], width: u32, height: u32, i420: &mut I420Buffer) {
     let (y_plane, u_plane, v_plane) = i420.data_mut();
     
-    let w = width as usize;
-    let h = height as usize;
+    let width_usize = width as usize;
+    let height_usize = height as usize;
     
-    // Process 2x2 blocks
-    for j in 0..h/2 {
-        for i in 0..w/2 {
-            // Get 4 pixels in BGRA format
-            let mut r_sum = 0i32;
-            let mut g_sum = 0i32;
-            let mut b_sum = 0i32;
+    // Process 2x2 blocks for chroma subsampling
+    for block_y in 0..height_usize/2 {
+        for block_x in 0..width_usize/2 {
+            // Accumulate RGB values for 2x2 block
+            let mut red_sum = 0i32;
+            let mut green_sum = 0i32;
+            let mut blue_sum = 0i32;
             
             for dy in 0..2 {
                 for dx in 0..2 {
-                    let px = i * 2 + dx;
-                    let py = j * 2 + dy;
-                    let idx = (py * w + px) * 4;
+                    let pixel_x = block_x * 2 + dx;
+                    let pixel_y = block_y * 2 + dy;
+                    let bgra_idx = (pixel_y * width_usize + pixel_x) * BYTES_PER_PIXEL;
                     
-                    if idx + 3 >= bgra.len() {
+                    if bgra_idx + BGRA_R >= bgra.len() {
                         continue;
                     }
                     
-                    let b = bgra[idx] as i32;
-                    let g = bgra[idx + 1] as i32;
-                    let r = bgra[idx + 2] as i32;
-                    // alpha at idx + 3 is ignored
+                    let blue = i32::from(bgra[bgra_idx + BGRA_B]);
+                    let green = i32::from(bgra[bgra_idx + BGRA_G]);
+                    let red = i32::from(bgra[bgra_idx + BGRA_R]);
+                    // alpha at bgra_idx + 3 is ignored
                     
                     // Calculate Y for this pixel
-                    let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-                    y_plane[py * w + px] = y.clamp(0, 255) as u8;
+                    let y_value = ((YUV_Y_R_COEF * red + YUV_Y_G_COEF * green + YUV_Y_B_COEF * blue + YUV_ROUNDING) >> YUV_SHIFT) + YUV_Y_OFFSET;
+                    y_plane[pixel_y * width_usize + pixel_x] = y_value.clamp(0, 255) as u8;
                     
-                    r_sum += r;
-                    g_sum += g;
-                    b_sum += b;
+                    red_sum += red;
+                    green_sum += green;
+                    blue_sum += blue;
                 }
             }
             
-            // Average for U and V
-            let r_avg = r_sum / 4;
-            let g_avg = g_sum / 4;
-            let b_avg = b_sum / 4;
+            // Average for U and V (chroma subsampling)
+            let red_avg = red_sum / 4;
+            let green_avg = green_sum / 4;
+            let blue_avg = blue_sum / 4;
             
-            let u = ((-38 * r_avg - 74 * g_avg + 112 * b_avg + 128) >> 8) + 128;
-            let v = ((112 * r_avg - 94 * g_avg - 18 * b_avg + 128) >> 8) + 128;
+            let u_value = ((YUV_U_R_COEF * red_avg + YUV_U_G_COEF * green_avg + YUV_U_B_COEF * blue_avg + YUV_ROUNDING) >> YUV_SHIFT) + YUV_UV_OFFSET;
+            let v_value = ((YUV_V_R_COEF * red_avg + YUV_V_G_COEF * green_avg + YUV_V_B_COEF * blue_avg + YUV_ROUNDING) >> YUV_SHIFT) + YUV_UV_OFFSET;
             
-            let uv_idx = j * (w / 2) + i;
+            let uv_idx = block_y * (width_usize / 2) + block_x;
             if uv_idx < u_plane.len() {
-                u_plane[uv_idx] = u.clamp(0, 255) as u8;
-                v_plane[uv_idx] = v.clamp(0, 255) as u8;
+                u_plane[uv_idx] = u_value.clamp(0, 255) as u8;
+                v_plane[uv_idx] = v_value.clamp(0, 255) as u8;
             }
         }
     }
